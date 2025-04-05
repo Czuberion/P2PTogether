@@ -47,10 +47,6 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     if (!pipePath.isEmpty()) {
         qInfo() << "Telling mpv to load file:" << pipePath;
         mpvWidget->command(QStringList() << "loadfile" << pipePath);
-        // Optional: Set some initial properties
-        // mpvWidget->setProperty("pause", true); // Start paused
-        // mpvWidget->setProperty("loop-file",
-        //                        "inf"); // Loop the pipe content if needed
     } else {
         qWarning() << "Pipe path is empty, cannot load into mpv.";
         // Optionally display a message on the video widget
