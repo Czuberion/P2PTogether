@@ -1,4 +1,18 @@
-﻿#include "mpvwidget.h"
+﻿/*!
+ * \file mpvwidget.cpp
+ * \brief Qt/OpenGL widget for libmpv (adapted from mpv-examples).
+ *
+ * \details
+ * Original source:
+ * \link
+ * https://github.com/mpv-player/mpv-examples/blob/master/libmpv/qt_opengl/mpvwidget.cpp
+ *    mpv-examples/libmpv/qt_opengl/mpvwidget.cpp
+ * \endlink
+ *
+ * \note
+ * This file is public domain per the example-repo’s broad grant.
+ */
+#include "mpvwidget.h"
 #include <QtCore/QMetaObject>
 #include <QtGui/QOpenGLContext>
 #include <stdexcept>

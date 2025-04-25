@@ -1,3 +1,17 @@
+/*!
+ * \file qthelper.hpp
+ * \brief Qt helper utilities for integrating libmpv into Qt applications.
+ *
+ * \details
+ * Original source:
+ * \link
+ * https://github.com/mpv-player/mpv-examples/blob/master/libmpv/common/qthelper.hpp
+ *    mpv-examples/libmpv/common/qthelper.hpp
+ * \endlink
+ *
+ * \note
+ * This file is public domain per the example-repo’s broad grant.
+ */
 #ifndef LIBMPV_QTHELPER_H_
 #define LIBMPV_QTHELPER_H_
 

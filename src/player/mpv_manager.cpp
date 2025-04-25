@@ -1,11 +1,9 @@
 #include "mpv_manager.h"
 #include <QDebug>
 #include <QDir>
-#include <stdexcept> // For runtime_error
-
-// For mkfifo/unlink (POSIX)
-#include <cerrno>  // For errno
-#include <cstring> // For strerror
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>

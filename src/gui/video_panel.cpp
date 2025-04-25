@@ -10,11 +10,10 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <stdexcept> // For runtime_error
+#include <stdexcept>
 
 namespace gui {
 
-// Update signature to accept MpvManager and QMainWindow
 QWidget* createVideoPanel(player::MpvManager* mpvManager,
                           QMainWindow* mainWindow) {
     // Container for video and controls

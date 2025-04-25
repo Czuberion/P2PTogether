@@ -20,7 +20,6 @@
 
 namespace gui {
 
-// Global callback for toggling the sidebar
 std::function<void()> SidebarToggleCallback;
 
 void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,

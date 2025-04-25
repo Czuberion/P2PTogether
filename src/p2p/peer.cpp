@@ -3,7 +3,7 @@
 namespace P2P {
 
 Peer::Peer() {
-    roles.push_back(Role::Viewer); // Default role is Viewer
+    roles.push_back(Role::Viewer);
 }
 
 Peer::Peer(const std::string& peerId) : peerId(peerId) {

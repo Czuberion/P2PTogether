@@ -2,13 +2,13 @@
 #include "gui/menus.h"
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
-#include "player/mpv_manager.h" // Include MpvManager
+#include "player/mpv_manager.h"
 
 #include <QDebug>
 #include <QHBoxLayout>
 #include <QSplitter>
 #include <QWidget>
-#include <stdexcept> // For std::runtime_error
+#include <stdexcept>
 
 namespace gui {
 
