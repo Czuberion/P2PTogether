@@ -6,7 +6,6 @@
  * Menus provide access to session management, settings, peer management, and
  * help, supporting the requirements for role-based control and usability.
  *
- * \see gui/menus.cpp
  * \see PRD F‑M2, F‑M4
  * \see SRS SR‑UI‑1, SR‑UI‑4
  */

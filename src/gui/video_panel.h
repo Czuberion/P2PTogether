@@ -24,13 +24,15 @@ class MpvManager;
 
 namespace gui {
 
-/**
+/*!
+ * \brief Creates the video panel for the GUI.
+ *
  * Creates the main video panel widget, including the embedded MpvWidget and
  * media controls.
  *
- * @param mpvManager Pointer to the MpvManager instance for controlling mpv.
- * @param mainWindow Pointer to the main QMainWindow (for fullscreen toggling).
- * @return QWidget* The constructed video panel widget.
+ * \param mpvManager Pointer to the MpvManager instance for controlling mpv.
+ * \param mainWindow Pointer to the main QMainWindow (for fullscreen toggling).
+ * \return QWidget* The constructed video panel widget.
  */
 QWidget* createVideoPanel(player::MpvManager* mpvManager,
                           QMainWindow* mainWindow);
