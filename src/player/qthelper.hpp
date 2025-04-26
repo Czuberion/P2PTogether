@@ -4,13 +4,13 @@
  *
  * \details
  * Original source:
- * \link
- * https://github.com/mpv-player/mpv-examples/blob/master/libmpv/common/qthelper.hpp
- *    mpv-examples/libmpv/common/qthelper.hpp
- * \endlink
+ * [mpv-player/mpv-examples/libmpv/common/qthelper.hpp](https://github.com/mpv-player/mpv-examples/blob/master/libmpv/common/qthelper.hpp)
  *
  * \note
  * This file is public domain per the example-repo’s broad grant.
+ *
+ * \see player/mpvwidget.h
+ * \see player/mpvwidget.cpp
  */
 #ifndef LIBMPV_QTHELPER_H_
 #define LIBMPV_QTHELPER_H_

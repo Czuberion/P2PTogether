@@ -4,13 +4,13 @@
  *
  * \details
  * Original source:
- * \link
- * https://github.com/mpv-player/mpv-examples/blob/master/libmpv/qt_opengl/mpvwidget.cpp
- *    mpv-examples/libmpv/qt_opengl/mpvwidget.cpp
- * \endlink
+ * [mpv-player/mpv-examples/libmpv/qt_opengl/mpvwidget.cpp](https://github.com/mpv-player/mpv-examples/blob/master/libmpv/qt_opengl/mpvwidget.cpp)
  *
  * \note
  * This file is public domain per the example-repo’s broad grant.
+ *
+ * \see player/mpvwidget.h
+ * \see player/qthelper.hpp
  */
 #include "mpvwidget.h"
 #include <QtCore/QMetaObject>
