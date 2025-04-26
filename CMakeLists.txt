@@ -53,3 +53,31 @@ target_compile_definitions(P2PTogether PRIVATE QT_DEPRECATED_WARNINGS)
 set_target_properties(P2PTogether PROPERTIES AUTOMOC ON)
 
 # set(CMAKE_AUTOMOC_RELAXED_MODE ON) # Optional, can help with complex includes
+
+# Doxygen documentation target
+find_package(Doxygen REQUIRED)
+
+# Where to put generated docs
+set(DOXYGEN_OUT       ${CMAKE_BINARY_DIR}/docs/doxygen)
+
+# Input Doxyfile and staged copy for configure_file
+set(DOXYFILE_IN       ${CMAKE_SOURCE_DIR}/Doxyfile)
+set(DOXYFILE_STAGED   ${CMAKE_BINARY_DIR}/Doxyfile)
+
+# Replace @CMAKE_SOURCE_DIR@ and @CMAKE_BINARY_DIR@ in your Doxyfile
+configure_file(
+  ${DOXYFILE_IN}
+  ${DOXYFILE_STAGED}
+  @ONLY
+)
+
+# Custom target to build docs
+add_custom_target(doc
+  # ensure the output directory exists
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${DOXYGEN_OUT}
+  # run doxygen
+  COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYFILE_STAGED}
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+  COMMENT "⏳ Generating Doxygen docs in ${DOXYGEN_OUT}"
+  VERBATIM
+)
