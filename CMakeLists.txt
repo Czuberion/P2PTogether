@@ -13,32 +13,32 @@ pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 set(SOURCES
-    src/main.cpp
-    src/p2p/peer.cpp
-    src/gui/app.cpp
-    src/gui/menus.cpp
-    src/gui/right_panel.cpp
-    src/gui/video_panel.cpp
-    src/player/mpvwidget.cpp
-    src/player/mpv_manager.cpp
+    client/main.cpp
+    client/p2p/peer.cpp
+    client/gui/app.cpp
+    client/gui/menus.cpp
+    client/gui/right_panel.cpp
+    client/gui/video_panel.cpp
+    client/player/mpvwidget.cpp
+    client/player/mpv_manager.cpp
 )
 
 set(HEADERS
-    src/p2p/peer.h
-    src/gui/app.h
-    src/gui/menus.h
-    src/gui/right_panel.h
-    src/gui/video_panel.h
-    src/player/mpvwidget.h
-    src/player/qthelper.hpp
-    src/player/mpv_manager.h
+    client/p2p/peer.h
+    client/gui/app.h
+    client/gui/menus.h
+    client/gui/right_panel.h
+    client/gui/video_panel.h
+    client/player/mpvwidget.h
+    client/player/qthelper.hpp
+    client/player/mpv_manager.h
 )
 
 add_executable(P2PTogether ${SOURCES} ${HEADERS})
 
 # Include directories
 target_include_directories(P2PTogether PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/client
     ${MPV_INCLUDE_DIRS}       # Add mpv include directory
 )
 
