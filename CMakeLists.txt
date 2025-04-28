@@ -9,6 +9,9 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 
+# Set all binary outputs to build/bin
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 set(SOURCES
     src/main.cpp
     src/p2p/peer.cpp
@@ -81,3 +84,53 @@ add_custom_target(doc
   COMMENT "⏳ Generating Doxygen docs in ${DOXYGEN_OUT}"
   VERBATIM
 )
+
+# --- Go service build target ---
+find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+find_program(GO_EXECUTABLE go REQUIRED)
+
+set(CLIENT_PROTO "${CMAKE_SOURCE_DIR}/proto/client.proto")
+set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto/client")
+
+add_custom_command(
+  OUTPUT ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${GO_CLIENT_OUT_DIR}
+  COMMAND ${PROTOC_EXECUTABLE}
+    --go_out=paths=source_relative:${GO_CLIENT_OUT_DIR}
+    --go-grpc_out=paths=source_relative:${GO_CLIENT_OUT_DIR}
+    -I ${CMAKE_SOURCE_DIR}/proto
+    ${CLIENT_PROTO}
+  DEPENDS ${CLIENT_PROTO}
+  COMMENT "Generating Go code for client.proto"
+  VERBATIM
+)
+
+add_custom_target(generate_go_client_proto ALL DEPENDS ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go)
+
+set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
+set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
+set(GO_SERVICE_BIN ${CMAKE_BINARY_DIR}/bin/peer_service)
+set(GO_MOD_FILE ${GO_SERVICE_DIR}/go.mod)
+
+# Ensure bin directory exists
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_custom_command(
+  OUTPUT ${GO_MOD_FILE}
+  COMMAND ${GO_EXECUTABLE} mod init p2ptogether/peer_service || exit 0
+  WORKING_DIRECTORY ${GO_SERVICE_DIR}
+  COMMENT "Initializing Go module for peer_service (if needed)"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${GO_SERVICE_BIN}
+  DEPENDS ${GO_SERVICE_SRC} ${GO_MOD_FILE} generate_go_client_proto
+  COMMAND ${GO_EXECUTABLE} mod tidy
+  COMMAND ${GO_EXECUTABLE} build -o ${GO_SERVICE_BIN} ${GO_SERVICE_SRC}
+  WORKING_DIRECTORY ${GO_SERVICE_DIR}
+  COMMENT "Building Go peer service"
+  VERBATIM
+)
+
+add_custom_target(peer_service ALL DEPENDS ${GO_SERVICE_BIN})

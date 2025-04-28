@@ -22,15 +22,11 @@ void runGUI(P2P::Peer* peer) {
     // the LC_NUMERIC category to be set to "C", so change it back.
     setlocale(LC_NUMERIC, "C");
 
-    // --- Create MpvManager ---
-    // It handles pipe creation in its constructor and cleanup in its destructor
-    // Ensure peer->peerId is valid before this point!
-    if (peer->peerId.empty()) {
-        qCritical("Peer ID is empty. Cannot initialize MpvManager.");
-        // Maybe show an error message to the user and exit?
-        return; // Or throw
-    }
-    player::MpvManager mpvManager(peer->peerId); // Create the manager
+    // --- Create MpvManager with the HLS URL provided by the Peer Service ---
+    // (Assumes you've already done a GetServiceInfo RPC to fetch hlsPort.)
+    quint32 hlsPort = /* grpcClient.GetServiceInfo(...).hls_port */ 9901;
+    QString hlsUrl  = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
+    player::MpvManager mpvManager(hlsUrl);
 
     // --- Main Window Setup ---
     QMainWindow window;

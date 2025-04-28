@@ -41,21 +41,21 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
         return videoPanel; // Return the panel containing the error
     }
 
-    // --- Load the Pipe ---
-    QString pipePath = mpvManager->getPipePath();
-    if (!pipePath.isEmpty()) {
-        qInfo() << "Telling mpv to load file:" << pipePath;
-        mpvWidget->command(QStringList() << "loadfile" << pipePath);
+    // --- Load the HLS URL ---
+    QString hlsUrl = mpvManager->getStreamURL();
+    if (!hlsUrl.isEmpty()) {
+        qInfo() << "Telling mpv to load HLS URL:" << hlsUrl;
+        mpvWidget->command(QStringList() << "loadfile" << hlsUrl);
     } else {
-        qWarning() << "Pipe path is empty, cannot load into mpv.";
+        qWarning() << "HLS URL not set; cannot load into mpv.";
         // Optionally display a message on the video widget
-        QLabel* noPipeLabel = new QLabel("No input pipe configured", mpvWidget);
-        noPipeLabel->setAlignment(Qt::AlignCenter);
-        noPipeLabel->setStyleSheet(
+        QLabel* noHlsLabel = new QLabel("No HLS configured", mpvWidget);
+        noHlsLabel->setAlignment(Qt::AlignCenter);
+        noHlsLabel->setStyleSheet(
             "color: yellow; background-color: rgba(0,0,0,0.5);");
         QVBoxLayout* overlayLayout =
             new QVBoxLayout(mpvWidget); // Need layout in mpvWidget for label
-        overlayLayout->addWidget(noPipeLabel, 0, Qt::AlignCenter);
+        overlayLayout->addWidget(noHlsLabel, 0, Qt::AlignCenter);
     }
 
     // --- Media Control Bar ---

@@ -43,16 +43,19 @@ namespace player {
 class MpvManager {
 public:
     /*!
-     * \brief Constructs an MpvManager for a given peer ID, creating a unique
-     * pipe path.
-     * \param peerId The unique identifier for the peer (used in pipe naming).
-     * \note The peer ID usage here is part of the temporary pipe mechanism.
+     * \brief Constructs an MpvManager
+     *
+     * \param hlsURL The HLS URL to be played by mpv.
      */
-    MpvManager(const std::string& peerId);
+    MpvManager(const QString& hlsURL);
+
     /*!
-     * \brief Destructor. Cleans up the named pipe if it was created.
-     * \note Relevant only for the temporary pipe implementation.
+     * \brief Constructs an MpvManager
+     *
+     * \param hlsURL The HLS URL to be played by mpv.
      */
+    MpvManager(const std::string& hlsURL);
+
     ~MpvManager();
 
     // Deleted copy/move operations to prevent accidental duplication.
@@ -62,29 +65,19 @@ public:
     MpvManager& operator=(MpvManager&&)      = delete;
 
     /*!
-     * \brief Creates the named pipe if it does not already exist
-     * (**temporary**).
-     * \return true if the pipe was created or already exists, false on error.
-     * \warning Uses POSIX-specific `mkfifo`, not cross-platform.
+     * \brief Returns the HLS URL for the stream to be played.
+     * \return QString containing the HLS URL.
      */
-    bool setupPipe();
+    QString getStreamURL() const;
+
     /*!
-     * \brief Removes the named pipe if it exists (**temporary**).
-     * \warning Uses POSIX-specific `unlink`.
+     * \brief Sets the HLS URL for the stream to be played.
+     * \param url The new HLS URL to be set.
      */
-    void cleanupPipe();
-    /*!
-     * \brief Returns the full path to the named pipe for use by mpv
-     * (**temporary**).
-     * \return QString containing the pipe path.
-     */
-    QString getPipePath() const;
+    void setStreamURL(const QString& url);
 
 private:
-    std::string m_peerId; ///< Peer ID used for temporary pipe naming.
-    QString m_pipePath;   ///< Full path to the temporary named pipe.
-    bool m_pipeCreated =
-        false; ///< True if the temporary pipe was created by this manager.
+    QString m_hlsURL; // Full HTTP URL for mini‑HLS endpoint.
 };
 
 } // namespace player

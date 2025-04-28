@@ -1,0 +1,33 @@
+syntax = "proto3";
+package p2p;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "peer_service/proto/p2p/grpc";
+
+// ––– Service-level messages –––
+
+message ServiceInfo {
+  // HTTP port where this peer's mini-HLS server is listening on localhost.
+  uint32 hls_port = 1;
+}
+
+// ––– Streaming wrappers –––
+
+message ClientMsg {
+  // oneof { your various client→service payloads go here }
+}
+
+message ServerMsg {
+  // oneof { your various service→client payloads go here }
+}
+
+// ––– RPC service for GUI ↔ Peer Service –––
+
+service P2PTClient {
+  // Tell me about your HLS port
+  rpc GetServiceInfo(google.protobuf.Empty) returns (ServiceInfo);
+
+  // Bidirectional control & chat stream
+  rpc ControlStream(stream ClientMsg) returns (stream ServerMsg);
+}
