@@ -8,6 +8,6 @@ go.sum
 peer_service/proto
 # !peer_service/proto/**/
 # !peer_service/proto/**/.gitkeep
-src/proto
-# !src/proto/**/
-# !src/proto/**/.gitkeep
+client/proto
+# !client/proto/**/
+# !client/proto/**/.gitkeep
