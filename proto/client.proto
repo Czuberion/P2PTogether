@@ -3,7 +3,7 @@ package p2p;
 
 import "google/protobuf/empty.proto";
 
-option go_package = "peer_service/proto/p2p/grpc";
+option go_package = "peer_service/proto/client";
 
 // ––– Service-level messages –––
 
@@ -22,7 +22,7 @@ message ServerMsg {
   // oneof { your various service→client payloads go here }
 }
 
-// ––– RPC service for GUI ↔ Peer Service –––
+// ––– RPC service for Client ↔ Peer Service –––
 
 service P2PTClient {
   // Tell me about your HLS port

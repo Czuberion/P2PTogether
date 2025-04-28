@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	pb "p2ptogether/peer_service/proto/client" // local import for client proto
+	pb "peer_service/proto/client" // local import for client proto
 )
 
 // server implements the gRPC service defined in proto.
