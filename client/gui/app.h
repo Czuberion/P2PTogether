@@ -28,8 +28,9 @@ namespace gui {
  *
  * \param peer Pointer to the P2P::Peer dummy object representing the local
  * user.
+ * \return The exit code of the QApplication event loop.
  */
-void runGUI(P2P::Peer* peer);
+int runGUI(P2P::Peer* peer);
 
 } // namespace gui
 

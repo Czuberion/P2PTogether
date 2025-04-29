@@ -21,6 +21,7 @@ set(SOURCES
     client/gui/video_panel.cpp
     client/player/mpvwidget.cpp
     client/player/mpv_manager.cpp
+    client/transport/grpc_client.cpp
 )
 
 set(HEADERS
@@ -32,6 +33,33 @@ set(HEADERS
     client/player/mpvwidget.h
     client/player/qthelper.hpp
     client/player/mpv_manager.h
+    client/transport/grpc_client.h
+)
+
+# --- C++ gRPC/protobuf stub generation ---
+find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED) # Correct executable name
+find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+set(CLIENT_PROTO "${CMAKE_SOURCE_DIR}/proto/client.proto")
+set(CPP_CLIENT_PROTO_OUT_DIR "${CMAKE_SOURCE_DIR}/client/proto")
+
+add_custom_command(
+  OUTPUT ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CPP_CLIENT_PROTO_OUT_DIR}
+  COMMAND ${PROTOC_EXECUTABLE}
+    --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN} # Specify the plugin path
+    --cpp_out=${CPP_CLIENT_PROTO_OUT_DIR}
+    --grpc_out=${CPP_CLIENT_PROTO_OUT_DIR}
+    -I ${CMAKE_SOURCE_DIR}/proto
+    ${CLIENT_PROTO}
+  DEPENDS ${CLIENT_PROTO} ${GRPC_CPP_PLUGIN}
+  COMMENT "Generating C++ gRPC/protobuf code for client.proto"
+  VERBATIM
+)
+
+# Add generated sources to build
+list(APPEND SOURCES
+  ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc
+  ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc
 )
 
 add_executable(P2PTogether ${SOURCES} ${HEADERS})
@@ -40,13 +68,28 @@ add_executable(P2PTogether ${SOURCES} ${HEADERS})
 target_include_directories(P2PTogether PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/client
     ${MPV_INCLUDE_DIRS}       # Add mpv include directory
+    ${CPP_CLIENT_PROTO_OUT_DIR}
+    ${Protobuf_INCLUDE_DIRS}
+    ${gRPC_INCLUDE_DIRS}
 )
 
 # Link libraries
+find_package(Protobuf REQUIRED)
+find_package(gRPC REQUIRED)
+
+if(NOT gRPC_FOUND)
+  message(FATAL_ERROR "gRPC not found!")
+endif()
+if(NOT Protobuf_FOUND)
+  message(FATAL_ERROR "Protobuf not found!")
+endif()
+
 target_link_libraries(P2PTogether PRIVATE
     Qt6::Widgets
-    Qt6::OpenGLWidgets      # Link against OpenGLWidgets
-    PkgConfig::MPV          # Link against mpv using the imported target
+    Qt6::OpenGLWidgets
+    PkgConfig::MPV
+    gRPC::grpc++
+    protobuf # Link protobuf directly by name
 )
 
 # Needed for mpvwidget/qthelper
@@ -86,10 +129,8 @@ add_custom_target(doc
 )
 
 # --- Go service build target ---
-find_program(PROTOC_EXECUTABLE protoc REQUIRED)
 find_program(GO_EXECUTABLE go REQUIRED)
 
-set(CLIENT_PROTO "${CMAKE_SOURCE_DIR}/proto/client.proto")
 set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto/client")
 
 add_custom_command(
@@ -134,3 +175,7 @@ add_custom_command(
 )
 
 add_custom_target(peer_service ALL DEPENDS ${GO_SERVICE_BIN})
+
+# Ensure proto generation before build
+add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc)
+add_dependencies(P2PTogether generate_cpp_client_proto)

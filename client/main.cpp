@@ -12,10 +12,77 @@
 
 #include "gui/app.h"
 #include "p2p/peer.h"
-#include <QDebug> // For qWarning if peerId is empty
+#include <QApplication>
+#include <QCoreApplication>
+#include <QDebug>
+#include <QDir>
+#include <QFileInfo>
+#include <QProcess>
+#include <QTextStream>
 #include <clocale>
 
 int main(int argc, char* argv[]) {
+    // Set up Qt Application context first
+    QApplication app(argc, argv);
+    QCoreApplication::setApplicationName("P2PTogether");
+    QCoreApplication::setApplicationVersion("0.1");
+
+    // Determine path to the Go peer_service executable
+    // Assumes peer_service is in the same directory as P2PTogether
+    QString appPath = QCoreApplication::applicationFilePath();
+    QFileInfo appInfo(appPath);
+    QString binDir =
+        appInfo.absolutePath(); // Directory containing the executable
+    QString peerServicePath = binDir + QDir::separator() + "peer_service";
+
+    // Check if the peer_service executable exists
+    if (!QFileInfo::exists(peerServicePath)) {
+        qCritical() << "Peer service executable not found at:"
+                    << peerServicePath;
+        qCritical() << "Please ensure the peer_service target has been built.";
+        return 1; // Exit if service cannot be found
+    }
+
+    // Start the Go peer_service
+    QProcess peerServiceProcess;
+    // Redirect output channels
+    peerServiceProcess.setProcessChannelMode(QProcess::MergedChannels);
+    peerServiceProcess.setReadChannel(QProcess::StandardOutput);
+
+    // Connect signals to read output when available
+    QObject::connect(&peerServiceProcess, &QProcess::readyReadStandardOutput,
+                     [&]() {
+                         QTextStream stream(&peerServiceProcess);
+                         while (!stream.atEnd()) {
+                             QString line = stream.readLine();
+                             qInfo() << "[peer_service]" << line;
+                         }
+                     });
+    QObject::connect(&peerServiceProcess, &QProcess::errorOccurred,
+                     [&](QProcess::ProcessError error) {
+                         qCritical() << "[peer_service process error]" << error
+                                     << peerServiceProcess.errorString();
+                     });
+
+    QStringList args = {"--grpc-port=8268"};
+    qInfo() << "Starting peer_service at:" << peerServicePath
+            << "with args:" << args;
+    peerServiceProcess.start(peerServicePath, args);
+
+    // Wait a short moment to allow the service to start and check for errors
+    if (!peerServiceProcess.waitForStarted(1000)) { // Wait up to 1 second
+        qCritical() << "Failed to start peer service process:"
+                    << peerServiceProcess.errorString();
+        // Attempt to read any error output before exiting
+        QByteArray errorOutput = peerServiceProcess.readAllStandardError();
+        if (!errorOutput.isEmpty()) {
+            qCritical() << "[peer_service stderr on startup failure]:"
+                        << QString::fromUtf8(errorOutput);
+        }
+        return 1; // Exit if service failed to start
+    }
+    qInfo() << "Started peer_service process.";
+
     // TODO: Replace with proper peer handling by the Go service.
     std::string peerId = "defaultPeerId";
     if (peerId.empty()) {
@@ -27,6 +94,14 @@ int main(int argc, char* argv[]) {
     // Construct the Peer object with the chosen peer ID.
     P2P::Peer peer(peerId);
     // Launch the main Qt GUI event loop.
-    gui::runGUI(&peer);
-    return 0;
+    int exitCode = gui::runGUI(&peer); // runGUI should return the exec() code
+
+    // Ensure the peer service is terminated when the GUI exits
+    peerServiceProcess.terminate();
+    if (!peerServiceProcess.waitForFinished(3000)) { // Wait up to 3 seconds
+        qWarning() << "Peer service process did not terminate gracefully.";
+        peerServiceProcess.kill();
+    }
+
+    return exitCode;
 }

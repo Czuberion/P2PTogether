@@ -3,29 +3,65 @@
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
 #include "player/mpv_manager.h"
+#include "transport/grpc_client.h"
 
 #include <QDebug>
 #include <QHBoxLayout>
 #include <QSplitter>
+#include <QThread>
 #include <QWidget>
 #include <stdexcept>
 
 namespace gui {
 
-void runGUI(P2P::Peer* peer) {
-    int argc = 0; // QApplication doesn't need real args here if not used
-    QApplication app(argc, nullptr);
-    app.setApplicationName("P2PTogether");
-    app.setApplicationDisplayName("P2PTogether");
-
+int runGUI(P2P::Peer* peer) {
     // Qt sets the locale in the QApplication constructor, but libmpv requires
     // the LC_NUMERIC category to be set to "C", so change it back.
     setlocale(LC_NUMERIC, "C");
 
+    // Add a small delay to allow the peer_service gRPC server to fully start
+    // This is a simple workaround for potential race conditions on startup.
+    QThread::msleep(500); // Wait for 500 milliseconds
+
+    // --- Instantiate gRPC Client and get HLS Port ---
+    P2P::GrpcClient grpcClient; // Assumes default address "127.0.0.1:8268"
+    quint32 hlsPort = 0;
+    try {
+        p2p::ServiceInfo serviceInfo = grpcClient.getServiceInfo();
+        hlsPort                      = serviceInfo.hls_port();
+        qInfo() << "Successfully fetched HLS port from peer service:"
+                << hlsPort;
+    } catch (const std::runtime_error& e) {
+        qCritical() << "Failed to get service info from peer_service:"
+                    << e.what();
+        return -1;
+    }
+
+    if (hlsPort == 0) {
+        qCritical() << "Received invalid HLS port (0) from peer service.";
+        return -1;
+    }
+
+    // --- Open and immediately close the control stream (placeholder) ---
+    qInfo() << "Attempting to open control stream...";
+    auto stream = grpcClient.openControlStream();
+    if (!stream) {
+        qCritical() << "Failed to open gRPC control stream.";
+        return -1;
+    }
+    qInfo() << "Control stream opened. Closing immediately (stub).";
+    stream->WritesDone();
+    grpc::Status status = stream->Finish();
+    if (!status.ok()) {
+        qWarning() << "Control stream Finish() failed:"
+                   << status.error_message().c_str();
+        // Non-fatal for now, but indicates potential issue
+    } else {
+        qInfo() << "Control stream closed successfully.";
+    }
+
     // --- Create MpvManager with the HLS URL provided by the Peer Service ---
-    // (Assumes you've already done a GetServiceInfo RPC to fetch hlsPort.)
-    quint32 hlsPort = /* grpcClient.GetServiceInfo(...).hls_port */ 9901;
-    QString hlsUrl  = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
+    QString hlsUrl = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
     player::MpvManager mpvManager(hlsUrl);
 
     // --- Main Window Setup ---
@@ -34,14 +70,11 @@ void runGUI(P2P::Peer* peer) {
     window.resize(1200, 700);
 
     // --- Cleanup Connections ---
-    QObject::connect(&app, &QApplication::aboutToQuit, [peer, &mpvManager]() {
+    QObject::connect(QApplication::instance(), &QApplication::aboutToQuit, [peer, &mpvManager]() {
         qDebug() << "GUI window closing; cleaning up resources...";
-        // mpvManager.cleanupPipe(); // Destructor will handle this now
         peer->cleanup();
         qDebug() << "Cleanup finished.";
     });
-    // Note: MpvManager destructor runs when 'runGUI' scope ends after
-    // app.exec() returns.
 
     // Create central widget and main layout
     QWidget* centralWidget = new QWidget(&window);
@@ -58,7 +91,7 @@ void runGUI(P2P::Peer* peer) {
     if (!leftPanel) { // Handle potential errors from createVideoPanel
         qCritical() << "Failed to create video panel!";
         // Consider showing an error message
-        return;
+        return -1;
     }
     mainSplitter->addWidget(leftPanel);
 
@@ -77,10 +110,8 @@ void runGUI(P2P::Peer* peer) {
     createMenus(&window, peer, mainSplitter, rightPanel, leftPanel);
 
     window.show();
-    app.exec();
-
-    // MpvManager destructor is automatically called here when it goes out of
-    // scope
+    // Return the exit code from the application event loop
+    return QApplication::instance()->exec();
 }
 
 } // namespace gui
