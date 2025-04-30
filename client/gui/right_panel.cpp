@@ -120,6 +120,7 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
     removeBtn->setFixedSize(40, 40);
     removeBtn->setStyleSheet("font-size: 20px; text-align: center;");
     removeBtn->setToolTip("Remove selected video from the queue");
+    removeBtn->setEnabled(false);
     QPushButton* clearBtn = new QPushButton("✕");
     clearBtn->setFixedSize(40, 40);
     clearBtn->setStyleSheet("font-size: 20px; text-align: center;");
@@ -183,6 +184,9 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
     });
     QObject::connect(clearBtn, &QPushButton::clicked,
                      [queueList]() { queueList->clear(); });
+
+    QObject::connect(queueList, &QListWidget::currentRowChanged,
+                     [removeBtn](int row) { removeBtn->setEnabled(row >= 0); });
 
     queueLayout->addWidget(queueHeaderWidget);
     queueLayout->addWidget(queueList);
