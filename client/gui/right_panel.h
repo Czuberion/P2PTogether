@@ -19,6 +19,14 @@
 namespace gui {
 
 /*!
+ * \brief Callback function for refreshing the visibility of queue buttons.
+ *
+ * This function is set in the menus and called when the queue button
+ * visibility needs to be updated based on the user's roles.
+ */
+extern std::function<void()> QueueButtonsRefreshCallback;
+
+/*!
  * \brief Creates the right panel widget for the GUI.
  *
  * This function sets up the chat, queue, and analytics dashboard in the right

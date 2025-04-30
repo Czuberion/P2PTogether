@@ -19,7 +19,7 @@
 
 namespace P2P {
 
-enum class Role { Viewer, Streamer };
+enum class Role { Viewer, Streamer, Moderator, Admin };
 
 class Peer {
 public:
@@ -34,6 +34,14 @@ public:
 
     std::vector<Role> roles;
 };
+
+inline bool hasQueuePermission(const std::vector<Role>& roles) {
+    for (auto r : roles) {
+        if (r == Role::Streamer || r == Role::Moderator || r == Role::Admin)
+            return true;
+    }
+    return false;
+}
 
 } // namespace P2P
 

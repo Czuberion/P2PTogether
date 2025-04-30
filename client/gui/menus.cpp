@@ -1,4 +1,5 @@
 #include "menus.h"
+#include "gui/right_panel.h"
 #include <QAction>
 #include <QComboBox>
 #include <QDebug>
@@ -174,12 +175,33 @@ void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,
         peer->roles = {P2P::Role::Viewer};
         QMessageBox::information(window, "Role Changed",
                                  "Your role has been changed to: Viewer");
+        if (gui::QueueButtonsRefreshCallback)
+            gui::QueueButtonsRefreshCallback();
     });
     QAction* streamerAction = rolesMenu->addAction("Streamer");
     QObject::connect(streamerAction, &QAction::triggered, [peer, window]() {
         peer->roles = {P2P::Role::Streamer};
         QMessageBox::information(window, "Role Changed",
                                  "Your role has been changed to: Streamer");
+        if (gui::QueueButtonsRefreshCallback)
+            gui::QueueButtonsRefreshCallback();
+    });
+    QAction* moderatorAction = rolesMenu->addAction("Moderator");
+    QObject::connect(moderatorAction, &QAction::triggered, [peer, window]() {
+        peer->roles = {P2P::Role::Moderator};
+        QMessageBox::information(window, "Role Changed",
+                                 "Your role has been changed to: Moderator");
+        if (gui::QueueButtonsRefreshCallback)
+            gui::QueueButtonsRefreshCallback();
+    });
+
+    QAction* adminAction = rolesMenu->addAction("Admin");
+    QObject::connect(adminAction, &QAction::triggered, [peer, window]() {
+        peer->roles = {P2P::Role::Admin};
+        QMessageBox::information(window, "Role Changed",
+                                 "Your role has been changed to: Admin");
+        if (gui::QueueButtonsRefreshCallback)
+            gui::QueueButtonsRefreshCallback();
     });
 
     // Help menu

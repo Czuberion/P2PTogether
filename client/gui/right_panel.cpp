@@ -1,4 +1,5 @@
 #include "right_panel.h"
+#include "p2p/peer.h"
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
@@ -17,6 +18,8 @@
 #include <QWidget>
 
 namespace gui {
+
+std::function<void()> QueueButtonsRefreshCallback;
 
 QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
     QWidget* rightPanel = new QWidget();
@@ -98,9 +101,16 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
     queueList->addItem("Sample_video_1.mp4");
     queueList->addItem("My_favorite_movie.mkv");
 
-    // Queue buttons
+    // Queue buttons (visible only when we have Queue permission)
     QWidget* queueButtonsWidget     = new QWidget();
     QHBoxLayout* queueButtonsLayout = new QHBoxLayout(queueButtonsWidget);
+
+    auto refreshQueueButtonsVisibility = [peer, queueButtonsWidget]() {
+        queueButtonsWidget->setVisible(P2P::hasQueuePermission(peer->roles));
+    };
+
+    QueueButtonsRefreshCallback = refreshQueueButtonsVisibility;
+
     queueButtonsWidget->setLayout(queueButtonsLayout);
     QPushButton* addBtn = new QPushButton("+");
     addBtn->setFixedSize(40, 40);
@@ -119,6 +129,7 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
     queueButtonsLayout->addWidget(removeBtn);
     queueButtonsLayout->addWidget(clearBtn);
     queueButtonsLayout->addStretch();
+    refreshQueueButtonsVisibility();
 
     // Use a static variable for queue visibility so it persists beyond this
     // function
@@ -139,6 +150,7 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
                 queueWidget->setMaximumHeight(queueList->sizeHint().height() +
                                               10);
             }
+            QueueButtonsRefreshCallback();
         });
 
     QObject::connect(
