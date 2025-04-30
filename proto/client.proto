@@ -31,3 +31,16 @@ service P2PTClient {
   // Bidirectional control & chat stream
   rpc ControlStream(stream ClientMsg) returns (stream ServerMsg);
 }
+
+message QueueCmd {
+  enum Type {
+    APPEND = 0;
+    REMOVE = 1;
+    NEXT = 2;
+    CLEAR = 3;
+  }
+  Type type = 1;
+  string file_path = 2; // meaningful only for APPEND
+  int32 index = 3;      // position for REMOVE (-1 ignored)
+  int64 hlc_ts = 4;
+}
