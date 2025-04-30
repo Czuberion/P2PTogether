@@ -24,12 +24,11 @@ const (
 
 	// Streaming permissions
 
-	Stream     // Permits streaming the content
-	PlayPause  // Permits playing or pausing the stream
-	Seek       // Permits seeking within the stream - changing the current position of playback
-	SetSpeed   // Permits changing the playback speed of the stream
-	Queue      // Permits adding and removing items from the queue
-	ClearQueue // Permits clearing the queue
+	Stream    // Permits streaming the content
+	PlayPause // Permits playing or pausing the stream
+	Seek      // Permits seeking within the stream - changing the current position of playback
+	SetSpeed  // Permits changing the playback speed of the stream
+	Queue     // Permits adding, removing, and clearing items from the queue
 
 	All = (1 << iota) - 1 // needs to be the last one
 )
@@ -52,7 +51,7 @@ var AllRoles = []Role{
 	},
 	{
 		Name:        "Streamer",
-		Permissions: Stream | PlayPause | Seek | SetSpeed | Queue | ClearQueue,
+		Permissions: Stream | PlayPause | Seek | SetSpeed | Queue,
 	},
 	{
 		Name:        "Viewer",
