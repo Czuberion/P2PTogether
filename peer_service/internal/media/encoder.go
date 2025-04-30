@@ -1,5 +1,5 @@
-// internal/encoder/encoder.go
-package encoder
+// internal/media/encoder.go
+package media
 
 import (
 	"fmt"
