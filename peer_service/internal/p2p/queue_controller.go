@@ -16,7 +16,7 @@ func NewQueueController() *QueueController { return &QueueController{q: &Queue{}
 
 func (qc *QueueController) Handle(cmd *pb.QueueCmd, sender peer.ID, perms roles.Permission) error {
 	if !roles.HasPermission(roles.Queue, []roles.Role{{Permissions: perms}}) {
-		return fmt.Errorf("permission denied")
+		return fmt.Errorf("permission denied: missing Queue perm")
 	}
 
 	switch cmd.Type {

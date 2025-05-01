@@ -16,10 +16,18 @@ message ServiceInfo {
 
 message ClientMsg {
   // oneof { your various client→service payloads go here }
+  oneof payload {
+    QueueCmd queue_cmd = 1;
+    // future: ChatMsg chat = 2;
+  }
 }
 
 message ServerMsg {
   // oneof { your various service→client payloads go here }
+  oneof payload {
+    QueueUpdate queue_update = 1;
+    // future: ChatMsg chat = 2;
+  }
 }
 
 // ––– RPC service for Client ↔ Peer Service –––
@@ -32,6 +40,8 @@ service P2PTClient {
   rpc ControlStream(stream ClientMsg) returns (stream ServerMsg);
 }
 
+// Queue
+
 message QueueCmd {
   enum Type {
     APPEND = 0;
@@ -42,5 +52,14 @@ message QueueCmd {
   Type type = 1;
   string file_path = 2; // meaningful only for APPEND
   int32 index = 3;      // position for REMOVE (-1 ignored)
+  int64 hlc_ts = 4;
+}
+
+message QueueUpdate { repeated QueueItem items = 1; }
+
+message QueueItem {
+  string file_path = 1;
+  string stored_by = 2; // peer.ID as string
+  string added_by = 3;  // peer.ID
   int64 hlc_ts = 4;
 }
