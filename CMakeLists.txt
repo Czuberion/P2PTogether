@@ -5,7 +5,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 
@@ -22,6 +22,7 @@ set(SOURCES
     client/player/mpvwidget.cpp
     client/player/mpv_manager.cpp
     client/transport/grpc_client.cpp
+    client/transport/control_stream_worker.cpp
 )
 
 set(HEADERS
@@ -34,6 +35,7 @@ set(HEADERS
     client/player/qthelper.hpp
     client/player/mpv_manager.h
     client/transport/grpc_client.h
+    client/transport/control_stream_worker.h
 )
 
 # --- C++ gRPC/protobuf stub generation ---
@@ -85,6 +87,7 @@ if(NOT Protobuf_FOUND)
 endif()
 
 target_link_libraries(P2PTogether PRIVATE
+    Qt6::Core
     Qt6::Widgets
     Qt6::OpenGLWidgets
     PkgConfig::MPV
