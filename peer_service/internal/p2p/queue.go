@@ -52,3 +52,12 @@ func (q *Queue) Head() (QueueItem, bool) {
 func (q *Queue) PopHead() {
 	q.Remove(0)
 }
+
+func (q *Queue) Items() []QueueItem {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	out := make([]QueueItem, len(q.items))
+	copy(out, q.items) // return a copy so callers can’t mutate us
+	return out
+}

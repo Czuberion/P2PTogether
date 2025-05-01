@@ -14,7 +14,23 @@ type QueueController struct {
 
 func NewQueueController() *QueueController { return &QueueController{q: &Queue{}} }
 
-func (qc *QueueController) Handle(cmd *pb.QueueCmd, sender peer.ID, perms roles.Permission) error {
+func (qc *QueueController) snapshot() *pb.ServerMsg {
+	it := qc.q.Items()
+	pbItems := make([]*pb.QueueItem, 0, len(it))
+	for _, x := range it {
+		pbItems = append(pbItems, &pb.QueueItem{
+			FilePath: x.FilePath,
+			StoredBy: x.StoredBy.String(),
+			AddedBy:  x.AddedBy.String(),
+			HlcTs:    x.HlcTs,
+		})
+	}
+	return &pb.ServerMsg{
+		Payload: &pb.ServerMsg_QueueUpdate{QueueUpdate: &pb.QueueUpdate{Items: pbItems}},
+	}
+}
+
+func (qc *QueueController) Handle(cmd *pb.QueueCmd, sender peer.ID, perms roles.Permission, hub *Hub) error {
 	if !roles.HasPermission(roles.Queue, []roles.Role{{Permissions: perms}}) {
 		return fmt.Errorf("permission denied: missing Queue perm")
 	}
@@ -34,6 +50,8 @@ func (qc *QueueController) Handle(cmd *pb.QueueCmd, sender peer.ID, perms roles.
 	case pb.QueueCmd_NEXT:
 		qc.q.PopHead()
 	}
-	// TODO: broadcast queue update to GUI
+
+	// after any successful mutation
+	hub.Broadcast(qc.snapshot())
 	return nil
 }
