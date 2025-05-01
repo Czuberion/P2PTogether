@@ -97,11 +97,18 @@ int main(int argc, char* argv[]) {
     int exitCode = gui::runGUI(&peer); // runGUI should return the exec() code
 
     // Ensure the peer service is terminated when the GUI exits
-    peerServiceProcess.terminate();
-    if (!peerServiceProcess.waitForFinished(3000)) { // Wait up to 3 seconds
-        qWarning() << "Peer service process did not terminate gracefully.";
-        peerServiceProcess.kill();
+    qInfo() << "Requesting peer_service termination..."; // Add log
+    peerServiceProcess.terminate(); // Sends SIGTERM
+
+    // Wait longer for graceful shutdown (e.g., 10 seconds)
+    if (!peerServiceProcess.waitForFinished(10000)) { // Wait up to 10 seconds
+        qWarning() << "Peer service process did not terminate gracefully after 10 seconds. Forcing kill.";
+        peerServiceProcess.kill(); // Force kill if still running
+        peerServiceProcess.waitForFinished(1000); // Short wait after kill
+    } else {
+        qInfo() << "Peer service process terminated gracefully."; // Add log
     }
 
+    qInfo() << "Exiting main application."; // Add log
     return exitCode;
 }

@@ -27,6 +27,11 @@ public:
     std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
     openControlStream();
 
+    // Opens the bidirectional control stream.
+    // Lets the caller provide (and later cancel) the context
+    std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+    openControlStream(grpc::ClientContext& ctx);
+
 private:
     std::shared_ptr<grpc::Channel> channel_;
     // Use the correct generated stub type: p2p::P2PTClient::Stub

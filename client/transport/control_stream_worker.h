@@ -26,6 +26,10 @@ public:
 public Q_SLOTS:
     //! enqueue a ClientMsg to be written on the stream
     void send(const p2p::ClientMsg& msg);
+    //! kicks off the blocking read-loop
+    void start();
+    //! ask the worker to shut down gracefully
+    void stop();
 
 Q_SIGNALS:
     //! emitted on **any** ServerMsg (slot in GUI decides what to do)
@@ -37,6 +41,7 @@ Q_SIGNALS:
 private:
     void run(); // blocking loop
     std::atomic<bool> quit_ {false};
+    std::unique_ptr<grpc::ClientContext> ctx_;
 
     std::unique_ptr<GrpcClient> client_;
     std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>

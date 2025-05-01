@@ -1,15 +1,17 @@
 #include "transport/grpc_client.h" // Correct include path relative to 'client/'
 
+#include <google/protobuf/empty.pb.h> // Include for Empty
 #include <grpcpp/create_channel.h>
 #include <stdexcept> // For std::runtime_error
-#include <google/protobuf/empty.pb.h> // Include for Empty
 
 namespace P2P {
 
 GrpcClient::GrpcClient(const std::string& target_address) {
-    channel_ = grpc::CreateChannel(target_address, grpc::InsecureChannelCredentials());
+    channel_ =
+        grpc::CreateChannel(target_address, grpc::InsecureChannelCredentials());
     if (!channel_) {
-        throw std::runtime_error("Failed to create gRPC channel to " + target_address);
+        throw std::runtime_error("Failed to create gRPC channel to " +
+                                 target_address);
     }
     // Use the correct generated stub type: p2p::P2PTClient::NewStub
     stub_ = p2p::P2PTClient::NewStub(channel_);
@@ -31,15 +33,24 @@ p2p::ServiceInfo GrpcClient::getServiceInfo() {
     if (status.ok()) {
         return response; // Return the whole response message
     } else {
-        throw std::runtime_error("GetServiceInfo RPC failed: " + status.error_message());
+        throw std::runtime_error("GetServiceInfo RPC failed: " +
+                                 status.error_message());
     }
 }
 
 // Use the generated p2p::ClientMsg and p2p::ServerMsg
-std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>> GrpcClient::openControlStream() {
+std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+GrpcClient::openControlStream() {
     auto context = std::make_unique<grpc::ClientContext>();
     // Use the correct stub_ type
     return stub_->ControlStream(context.release());
+}
+
+// openControlStream with external context
+std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+GrpcClient::openControlStream(grpc::ClientContext& ctx) {
+    // caller owns ctx lifetime & cancellation
+    return stub_->ControlStream(&ctx);
 }
 
 } // namespace P2P

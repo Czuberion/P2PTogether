@@ -3,6 +3,7 @@
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
 #include "player/mpv_manager.h"
+#include "transport/control_stream_worker.h"
 #include "transport/grpc_client.h"
 
 #include <QDebug>
@@ -10,6 +11,7 @@
 #include <QSplitter>
 #include <QThread>
 #include <QWidget>
+#include <QMetaObject>
 #include <stdexcept>
 
 namespace gui {
@@ -69,12 +71,41 @@ int runGUI(P2P::Peer* peer) {
     window.setWindowTitle("P2PTogether");
     window.resize(1200, 700);
 
-    // --- Cleanup Connections ---
-    QObject::connect(QApplication::instance(), &QApplication::aboutToQuit, [peer, &mpvManager]() {
-        qDebug() << "GUI window closing; cleaning up resources...";
-        peer->cleanup();
-        qDebug() << "Cleanup finished.";
-    });
+    // -------- control-stream worker thread ----------
+    // Create thread and worker without parents initially
+    QThread* netThread = new QThread();
+    auto worker        = new P2P::ControlStreamWorker(
+        std::make_unique<P2P::GrpcClient>(std::move(grpcClient)),
+        nullptr); // No parent
+
+    worker->moveToThread(netThread);
+
+    // When thread starts, run the worker's main function
+    QObject::connect(netThread, &QThread::started, worker, &P2P::ControlStreamWorker::start);
+
+    // When worker finishes processing, tell the thread's event loop to quit
+    QObject::connect(worker, &P2P::ControlStreamWorker::finished, netThread, &QThread::quit);
+
+    // When the thread finishes (after quit() and run() returns), schedule worker deletion
+    QObject::connect(netThread, &QThread::finished, worker, &QObject::deleteLater);
+
+    // When the thread finishes, schedule the thread object itself for deletion
+    QObject::connect(netThread, &QThread::finished, netThread, &QObject::deleteLater);
+
+    // --- Application Cleanup ---
+    QObject::connect(
+        QApplication::instance(), &QApplication::aboutToQuit,
+        [peer, worker]() { // Capture worker by pointer
+            qDebug() << "GUI about to quit; initiating cleanup...";
+            // Request the worker to stop (will run in netThread)
+            // Use QueuedConnection so it posts an event to the netThread's loop
+            QMetaObject::invokeMethod(worker, "stop", Qt::QueuedConnection);
+            peer->cleanup(); // Call peer cleanup (runs in main thread)
+            qDebug() << "Peer cleanup requested.";
+            // Don't wait here; signals handle thread termination.
+        });
+
+    netThread->start(); // Start the thread's event loop
 
     // Create central widget and main layout
     QWidget* centralWidget = new QWidget(&window);
@@ -111,7 +142,11 @@ int runGUI(P2P::Peer* peer) {
 
     window.show();
     // Return the exit code from the application event loop
-    return QApplication::instance()->exec();
+    int rc = QApplication::exec();
+
+    qDebug() << "QApplication::exec() finished with code:" << rc;
+
+    return rc;
 }
 
 } // namespace gui
