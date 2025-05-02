@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"peer_service/internal/media"
 	"peer_service/internal/p2p"
 	"peer_service/internal/roles"
 	pb "peer_service/proto/client" // local import for client proto
@@ -82,12 +83,13 @@ func main() {
 	hlsPort := uint32(httpLn.Addr().(*net.TCPAddr).Port)
 	log.Printf("HLS endpoint listening on %s\n", httpLn.Addr().String())
 
-	// Serve placeholder playlist/segments
+	// --- mini‑HLS in‑RAM buffer ---
+	rb := media.NewRingBuffer(120) // 120 s window
+	plH, segH := media.Handler(rb)
+
 	httpMux := http.NewServeMux()
-	httpMux.HandleFunc("/stream.m3u8", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotImplemented)
-		fmt.Fprintln(w, "#EXTM3U\n# TODO serve real .m3u8")
-	})
+	httpMux.HandleFunc("/stream.m3u8", plH)
+	httpMux.HandleFunc("/seg_", segH) // matches /seg_<seq>.ts
 	httpServer := &http.Server{Addr: httpLn.Addr().String(), Handler: httpMux}
 
 	// Goroutine to start the HLS server
