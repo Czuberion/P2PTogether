@@ -5,6 +5,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(CTest)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
@@ -134,6 +136,60 @@ add_custom_target(doc
 # --- Go service build target ---
 find_program(GO_EXECUTABLE go REQUIRED)
 
+# -------------------------------------------------------------
+#  Generate a throw‑away Go workspace at *source‑root*
+#  ------------------------------------------------------------
+set(GO_WORK_FILE "${CMAKE_SOURCE_DIR}/go.work")
+
+add_custom_command(
+    OUTPUT  ${GO_WORK_FILE}
+    # 1) nuke any stale workspace
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${GO_WORK_FILE}
+    # 2) recreate it pointing at our two modules
+    COMMAND ${GO_EXECUTABLE} work init
+            "${CMAKE_SOURCE_DIR}/peer_service"
+            "${CMAKE_SOURCE_DIR}/tests/go"
+    # 3) keep it up‑to‑date if we ever change dependencies
+    COMMAND ${GO_EXECUTABLE} work sync
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Regenerating temporary go.work workspace at repo root"
+    VERBATIM)
+
+add_custom_target(go_workspace ALL DEPENDS ${GO_WORK_FILE})
+
+# ---------------- Go vet / unit tests ----------------
+enable_testing()
+
+# --- All Go packages we want to analyse / test ---
+set(GO_PKG_PATTERNS ./peer_service/...)
+
+# ---- Custom targets that the build graph can depend on ----
+add_custom_target(go_vet
+    COMMAND ${GO_EXECUTABLE} vet ${GO_PKG_PATTERNS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    DEPENDS go_workspace generate_go_client_proto
+    COMMENT "Running go vet ${GO_PKG_PATTERNS}")
+
+add_custom_target(go_unit_tests
+    COMMAND ${GO_EXECUTABLE} test ${GO_PKG_PATTERNS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    DEPENDS go_workspace generate_go_client_proto
+    COMMENT "Running go test ${GO_PKG_PATTERNS}")
+
+# ---- register the same commands with CTest (optional) ----
+add_test(NAME go_vet
+         COMMAND ${GO_EXECUTABLE} vet ${GO_PKG_PATTERNS}
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(NAME go_unit_tests
+         COMMAND ${GO_EXECUTABLE} test ${GO_PKG_PATTERNS}
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Make sure proto generation & workspace exist before tests
+add_dependencies(go_unit_tests go_workspace generate_go_client_proto)
+add_dependencies(go_vet       go_workspace generate_go_client_proto)
+
+# --- Go client proto generation ---
 set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto/client")
 
 add_custom_command(
