@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -89,7 +90,16 @@ func main() {
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/stream.m3u8", plH)
-	httpMux.HandleFunc("/seg_", segH) // matches /seg_<seq>.ts
+	// httpMux.HandleFunc("/seg_", segH) // matches /seg_<seq>.ts
+	httpMux.HandleFunc("/ingest/", media.IngestHandler(rb))
+	httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/seg_") && strings.HasSuffix(r.URL.Path, ".ts"):
+			segH(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
 	httpServer := &http.Server{Addr: httpLn.Addr().String(), Handler: httpMux}
 
 	// Goroutine to start the HLS server

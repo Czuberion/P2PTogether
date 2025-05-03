@@ -43,6 +43,33 @@ func NewRingBuffer(windowSeconds int) *RingBuffer {
 	}
 }
 
+// Len returns how many segments are currently stored (could be less than capacity).
+func (rb *RingBuffer) Len() int {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	if rb.nextSeq <= rb.baseSeq {
+		return 0
+	}
+	count := int(rb.nextSeq - rb.baseSeq)
+	if count > rb.capacity {
+		return rb.capacity
+	}
+	return count
+}
+
+// idxFor converts a sequence number into a buffer index, assuming seq ∈ [baseSeq, nextSeq).
+// Returns -1 if the seq is out of range.
+func (rb *RingBuffer) idxFor(seq uint32) int {
+	if seq < rb.baseSeq || seq >= rb.nextSeq {
+		return -1
+	}
+	// distance behind head:
+	off := rb.nextSeq - seq
+	// head points at next write slot, so back up off steps:
+	idx := (rb.head - int(off) + rb.capacity) % rb.capacity
+	return idx
+}
+
 func (rb *RingBuffer) Write(data []byte, pts float64) uint32 {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
@@ -60,35 +87,60 @@ func (rb *RingBuffer) Write(data []byte, pts float64) uint32 {
 	return seq
 }
 
-// Snapshot returns a copy (!) of the currently stored segments in order
-// oldest→newest together with the EXT‑X‑MEDIA‑SEQUENCE of the first slot.
+// Snapshot returns a slice of live segments (oldest→newest) together with the
+// EXT‑X‑MEDIA‑SEQUENCE of the first slot.
 func (rb *RingBuffer) Snapshot() (base uint32, segs []Segment) {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 
-	segs = make([]Segment, 0, rb.capacity)
-	for i := 0; i < rb.capacity; i++ {
-		idx := (rb.head + i) % rb.capacity
-		s := rb.buf[idx]
-		if s.Data == nil || s.Seq < rb.baseSeq {
-			continue
+	if rb.nextSeq == rb.baseSeq { // buffer empty
+		return rb.baseSeq, nil
+	}
+
+	count := rb.nextSeq - rb.baseSeq
+	segs = make([]Segment, 0, count)
+	for seq := rb.baseSeq; seq < rb.nextSeq; seq++ {
+		if idx := rb.idxFor(seq); idx >= 0 {
+			segs = append(segs, rb.buf[idx])
 		}
-		segs = append(segs, s)
 	}
 	return rb.baseSeq, segs
 }
 
-// Get returns the payload for seq or nil if evicted / not yet seen.
+// Get returns the raw payload for a given sequence, or nil if it's out of range.
 func (rb *RingBuffer) Get(seq uint32) []byte {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 
-	if seq < rb.baseSeq {
-		return nil // too old
+	if idx := rb.idxFor(seq); idx >= 0 {
+		return rb.buf[idx].Data
 	}
-	delta := seq - rb.baseSeq
-	if int(delta) >= rb.capacity {
-		return nil // not written yet OR wrapped
+	return nil
+}
+
+// WriteAt writes a segment with an explicit sequence number. It
+// advances nextSeq if needed and evicts old entries exactly
+// like Write does.
+func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	// place the segment at the current head
+	rb.buf[rb.head] = Segment{
+		Seq:  seq,
+		Data: data,
+		PTS:  pts,
+		Time: rb.now(),
 	}
-	return rb.buf[(rb.head+int(delta))%rb.capacity].Data
+	rb.head = (rb.head + 1) % rb.capacity
+
+	// keep nextSeq monotonic
+	if seq >= rb.nextSeq {
+		rb.nextSeq = seq + 1
+	}
+
+	// evict anything older than capacity
+	if rb.nextSeq > uint32(rb.capacity) {
+		rb.baseSeq = rb.nextSeq - uint32(rb.capacity)
+	}
 }
