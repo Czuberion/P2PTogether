@@ -223,6 +223,9 @@ add_custom_command(
   VERBATIM
 )
 
+file(GLOB_RECURSE GO_SERVICE_SRCS
+     ${GO_SERVICE_DIR}/*.go)
+
 add_custom_command(
   OUTPUT ${GO_SERVICE_BIN}
   DEPENDS ${GO_SERVICE_SRC} ${GO_MOD_FILE} generate_go_client_proto
