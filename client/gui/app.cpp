@@ -8,10 +8,10 @@
 
 #include <QDebug>
 #include <QHBoxLayout>
+#include <QMetaObject>
 #include <QSplitter>
 #include <QThread>
 #include <QWidget>
-#include <QMetaObject>
 #include <stdexcept>
 
 namespace gui {
@@ -81,16 +81,21 @@ int runGUI(P2P::Peer* peer) {
     worker->moveToThread(netThread);
 
     // When thread starts, run the worker's main function
-    QObject::connect(netThread, &QThread::started, worker, &P2P::ControlStreamWorker::start);
+    QObject::connect(netThread, &QThread::started, worker,
+                     &P2P::ControlStreamWorker::start);
 
     // When worker finishes processing, tell the thread's event loop to quit
-    QObject::connect(worker, &P2P::ControlStreamWorker::finished, netThread, &QThread::quit);
+    QObject::connect(worker, &P2P::ControlStreamWorker::finished, netThread,
+                     &QThread::quit);
 
-    // When the thread finishes (after quit() and run() returns), schedule worker deletion
-    QObject::connect(netThread, &QThread::finished, worker, &QObject::deleteLater);
+    // When the thread finishes (after quit() and run() returns), schedule
+    // worker deletion
+    QObject::connect(netThread, &QThread::finished, worker,
+                     &QObject::deleteLater);
 
     // When the thread finishes, schedule the thread object itself for deletion
-    QObject::connect(netThread, &QThread::finished, netThread, &QObject::deleteLater);
+    QObject::connect(netThread, &QThread::finished, netThread,
+                     &QObject::deleteLater);
 
     // --- Application Cleanup ---
     QObject::connect(
@@ -112,6 +117,8 @@ int runGUI(P2P::Peer* peer) {
     window.setCentralWidget(centralWidget);
     QHBoxLayout* mainLayout = new QHBoxLayout(centralWidget);
     centralWidget->setLayout(mainLayout);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
 
     // Main splitter
     QSplitter* mainSplitter = new QSplitter(Qt::Horizontal, centralWidget);

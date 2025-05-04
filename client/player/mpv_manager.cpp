@@ -1,5 +1,10 @@
 #include "mpv_manager.h"
 #include <QDebug>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QTimer>
+#include <QUrl>
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
@@ -8,16 +13,27 @@
 #include <unistd.h>
 
 namespace player {
-MpvManager::MpvManager(const QString& hlsURL) : m_hlsURL(hlsURL) {
+
+// ────────────────────────── ctor / dtor ──────────────────────────
+
+MpvManager::MpvManager(const QString& hlsURL, QObject* parent) :
+    QObject(parent), m_hlsURL(hlsURL) {
+    probeTimer_.setInterval(500);
+    probeTimer_.setSingleShot(false);
+
+    // poll every 500 ms until the manifest contains at least one segment
+    connect(&probeTimer_, &QTimer::timeout, this, &MpvManager::probePlaylist);
+
+    probeTimer_.start();
     qInfo() << "MpvManager: HLS URL set to" << m_hlsURL;
 }
 
 MpvManager::MpvManager(const std::string& hlsURL) :
-    m_hlsURL(QString::fromStdString(hlsURL)) {
-    qInfo() << "MpvManager: HLS URL set to" << m_hlsURL;
-}
+    MpvManager(QString::fromStdString(hlsURL)) {}
 
 MpvManager::~MpvManager() = default;
+
+// ─────────────────────── getters / setters ───────────────────────
 
 QString MpvManager::getStreamURL() const {
     return m_hlsURL;
@@ -25,7 +41,43 @@ QString MpvManager::getStreamURL() const {
 
 void MpvManager::setStreamURL(const QString& url) {
     m_hlsURL = url;
+    if (!probeTimer_.isActive())
+        probeTimer_.start();
     qInfo() << "MpvManager: HLS URL updated to" << m_hlsURL;
+}
+
+// ───────────────────────── internal helpers ──────────────────────
+
+void MpvManager::probePlaylist() {
+    QNetworkRequest req {QUrl(m_hlsURL)};
+
+    QNetworkReply* rep = nam_.get(req); // async GET
+
+    connect(rep, &QNetworkReply::finished, this, [this, rep]() {
+        const auto err  = rep->error();
+        const auto body = rep->readAll();
+        rep->deleteLater();
+
+        if (err == QNetworkReply::NoError && body.contains("#EXTINF")) {
+            probeTimer_.stop(); // playlist finally ready
+            tryStartPlayback();
+        }
+    });
+}
+
+void MpvManager::tryStartPlayback() {
+    // Stop any residual polling – defensive, but cheap.
+    if (probeTimer_.isActive())
+        probeTimer_.stop();
+
+    qDebug() << "[MpvManager] Playlist ready – emitting playlistReady()";
+
+    // Emit exactly once per playlist URL (guard‑against duplicates if needed).
+    static QString lastUrl;
+    if (lastUrl != m_hlsURL) {
+        lastUrl = m_hlsURL;
+        Q_EMIT playlistReady(m_hlsURL);
+    }
 }
 
 } // namespace player

@@ -41,6 +41,7 @@ MpvWidget::MpvWidget(QWidget* parent, Qt::WindowFlags f) :
     mpv_set_option_string(mpv, "terminal", "yes");
     mpv_set_option_string(mpv, "msg-level", "all=v");
     mpv_set_option_string(mpv, "vo", "libmpv");
+    mpv_set_option_string(mpv, "keepaspect", "yes");
     if (mpv_initialize(mpv) < 0)
         throw std::runtime_error("could not initialize mpv context");
 
@@ -86,8 +87,9 @@ void MpvWidget::initializeGL() {
 }
 
 void MpvWidget::paintGL() {
-    mpv_opengl_fbo mpfbo {static_cast<int>(defaultFramebufferObject()), width(),
-                          height(), 0};
+    const qreal dpr = devicePixelRatioF();
+    mpv_opengl_fbo mpfbo {static_cast<int>(defaultFramebufferObject()),
+                          int(width() * dpr), int(height() * dpr), 0};
     int flip_y {1};
 
     mpv_render_param params[] = {{MPV_RENDER_PARAM_OPENGL_FBO, &mpfbo},

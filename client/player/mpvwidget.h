@@ -30,7 +30,7 @@ public:
     void command(const QVariant& params);
     void setProperty(const QString& name, const QVariant& value);
     QVariant getProperty(const QString& name) const;
-    QSize sizeHint() const override { return QSize(480, 270); }
+    QSize sizeHint() const override { return {}; }
 Q_SIGNALS:
     void durationChanged(int value);
     void positionChanged(int value);

@@ -20,13 +20,15 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     QWidget* videoPanel = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(videoPanel);
     videoPanel->setLayout(layout);
+    layout->setContentsMargins(0, 0, 0, 0); // no outer gaps
+    layout->setSpacing(0);                  // no inner gaps
 
     // --- Video Widget ---
     // Replace the placeholder QWidget with MpvWidget
     player::MpvWidget* mpvWidget = nullptr;
     try {
         mpvWidget = new player::MpvWidget();
-        mpvWidget->setMinimumSize(640, 360);
+        mpvWidget->setMinimumSize(100, 100);
         // Set background for aesthetics before video loads/if error
         mpvWidget->setStyleSheet("background-color: #1a1a1a;");
     } catch (const std::runtime_error& e) {
@@ -42,28 +44,34 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     }
 
     // --- Load the HLS URL ---
-    QString hlsUrl = mpvManager->getStreamURL();
-    if (!hlsUrl.isEmpty()) {
-        qInfo() << "Telling mpv to load HLS URL:" << hlsUrl;
-        mpvWidget->command(QStringList() << "loadfile" << hlsUrl);
-    } else {
-        qWarning() << "HLS URL not set; cannot load into mpv.";
-        // Optionally display a message on the video widget
-        QLabel* noHlsLabel = new QLabel("No HLS configured", mpvWidget);
-        noHlsLabel->setAlignment(Qt::AlignCenter);
-        noHlsLabel->setStyleSheet(
-            "color: yellow; background-color: rgba(0,0,0,0.5);");
-        QVBoxLayout* overlayLayout =
-            new QVBoxLayout(mpvWidget); // Need layout in mpvWidget for label
-        overlayLayout->addWidget(noHlsLabel, 0, Qt::AlignCenter);
-    }
+    QObject::connect(mpvManager, &player::MpvManager::playlistReady,
+                     [mpvWidget](const QString& url) {
+                         qInfo() << "Playlist ready, loading HLS URL:" << url;
+                         mpvWidget->command(QStringList() << "loadfile" << url);
+                     });
+
+    // Display a “waiting for stream…” overlay until ready:
+    QLabel* waiting = new QLabel("Waiting for stream…", mpvWidget);
+    waiting->setAlignment(Qt::AlignCenter);
+    waiting->setStyleSheet("color: white; background: rgba(0,0,0,0.5);");
+    waiting->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    // put it in a zero-margin V-box on top of the video widget:
+    auto* overlayLayout = new QVBoxLayout(mpvWidget);
+    overlayLayout->setContentsMargins(0, 0, 0, 0);
+    overlayLayout->addStretch();
+    overlayLayout->addWidget(waiting, /*stretch=*/0, Qt::AlignCenter);
+    overlayLayout->addStretch();
+    waiting->show();
+    QObject::connect(mpvManager, &player::MpvManager::playlistReady, waiting,
+                     &QWidget::hide);
 
     // --- Media Control Bar ---
     QWidget* controlBar = new QWidget();
     controlBar->setMaximumHeight(60); // Give controls some space
     QHBoxLayout* controlLayout = new QHBoxLayout(controlBar);
     controlBar->setLayout(controlLayout);
-    controlLayout->setContentsMargins(5, 0, 5, 5); // Add some margins
+    controlLayout->setContentsMargins(5, 5, 5, 5); // Add some margins
 
     // --- Control Buttons ---
 
@@ -151,6 +159,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     });
     controlLayout->addWidget(replayBtn);
 
+    controlLayout->addSpacing(30);
     controlLayout->addStretch(); // Pushes following items to the right
 
     // Screenshot Button (using mpv's command)

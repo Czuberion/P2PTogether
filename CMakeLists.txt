@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(CTest)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets Network)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 
@@ -92,6 +92,7 @@ target_link_libraries(P2PTogether PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::OpenGLWidgets
+    Qt6::Network
     PkgConfig::MPV
     gRPC::grpc++
     protobuf # Link protobuf directly by name
