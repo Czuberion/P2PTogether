@@ -15,24 +15,25 @@ func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFun
 
 	playlist = func(w http.ResponseWriter, r *http.Request) {
 		base, segs := rb.Snapshot()
-		if len(segs) == 0 {
-			http.Error(w, "#EXTM3U\n# empty", http.StatusServiceUnavailable)
-			return
-		}
-
+		// Always return **200 OK** so mpv can keep polling while the buffer
+		// is still empty. A syntactically‑valid stub avoids the 503 → fatal
+		// error.
 		var buf bytes.Buffer
+
 		buf.WriteString("#EXTM3U\n")
 		buf.WriteString("#EXT-X-VERSION:3\n")
 		buf.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
 		buf.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(SegmentDuration.Seconds())))
 		buf.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", base))
 
+		// If we already have segments, list them; otherwise return just the header.
 		for _, s := range segs {
 			buf.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", SegmentDuration.Seconds()))
 			buf.WriteString(fmt.Sprintf("seg_%d.ts\n", s.Seq))
 		}
 
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.WriteHeader(http.StatusOK)
 		w.Write(buf.Bytes())
 	}
 
