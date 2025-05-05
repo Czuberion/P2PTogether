@@ -11,26 +11,26 @@ type Permission int
 const (
 	// Interaction permissions
 
-	View Permission = 1 << iota // Permits viewing the stream
-	Chat                        // Permits sending messages in the chat
+	PermView Permission = 1 << iota // Permits viewing the stream
+	PermChat                        // Permits sending messages in the chat
 
 	// Moderation permissions
 
-	KickUser        // Permits kicking a user from the session
-	BanUser         // Permits banning a user from the session. Makes them unable to rejoin
-	ModerateChat    // Permits moderating the chat, including deleting messages and muting users
-	AddRemoveRoles  // Permits adding or removing roles session-wide
-	ManageUserRoles // Permits managing roles of users, including granting or revoking roles
+	PermKickUser        // Permits kicking a user from the session
+	PermBanUser         // Permits banning a user from the session. Makes them unable to rejoin
+	PermModerateChat    // Permits moderating the chat, including deleting messages and muting users
+	PermAddRemoveRoles  // Permits adding or removing roles session-wide
+	PermManageUserRoles // Permits managing roles of users, including granting or revoking roles
 
 	// Streaming permissions
 
-	Stream    // Permits streaming the content
-	PlayPause // Permits playing or pausing the stream
-	Seek      // Permits seeking within the stream - changing the current position of playback
-	SetSpeed  // Permits changing the playback speed of the stream
-	Queue     // Permits adding, removing, and clearing items from the queue
+	PermStream    // Permits streaming the content
+	PermPlayPause // Permits playing or pausing the stream
+	PermSeek      // Permits seeking within the stream - changing the current position of playback
+	PermSetSpeed  // Permits changing the playback speed of the stream
+	PermQueue     // Permits adding, removing, and clearing items from the queue
 
-	All = (1 << iota) - 1 // needs to be the last one
+	PermAll = (1 << iota) - 1 // needs to be the last one
 )
 
 // Role defines a peer's role with a name and associated permissions
@@ -39,58 +39,88 @@ type Role struct {
 	Permissions Permission
 }
 
-// AllRoles defines all predefined roles with their associated permissions
-var AllRoles = []Role{
+// defaultRoles defines all predefined roles with their associated permissions
+var defaultRoles = []Role{
 	{
 		Name:        "Admin",
-		Permissions: All,
+		Permissions: PermAll,
 	},
 	{
-		Name:        "Moderator",
-		Permissions: KickUser | BanUser | ModerateChat | AddRemoveRoles | ManageUserRoles,
+		Name: "Moderator",
+		Permissions: PermKickUser |
+			PermBanUser |
+			PermModerateChat |
+			PermAddRemoveRoles |
+			PermManageUserRoles,
 	},
 	{
-		Name:        "Streamer",
-		Permissions: Stream | PlayPause | Seek | SetSpeed | Queue,
+		Name: "Streamer",
+		Permissions: PermStream |
+			PermPlayPause |
+			PermSeek |
+			PermSetSpeed |
+			PermQueue,
 	},
 	{
 		Name:        "Viewer",
-		Permissions: View | Chat,
+		Permissions: PermView | PermChat,
 	},
-	// Add more predefined roles here as needed
 }
 
-// CalculateTotalPermissions computes the combined permissions from a slice of roles.
-func CalculateTotalPermissions(roles []Role) Permission {
-	var totalPermissions Permission
-	for _, role := range roles {
-		totalPermissions |= role.Permissions
+// AllRoles maps canonical role names → Role.
+// Populated in init() for O(1) look‑ups.
+var AllRoles map[string]Role
+
+func init() {
+	AllRoles = make(map[string]Role, len(defaultRoles))
+	for _, r := range defaultRoles {
+		AllRoles[strings.ToLower(r.Name)] = r // normalise key
 	}
-	return totalPermissions
 }
 
-// HasPermission checks if any of the roles contain the required permission
-func HasPermission(required Permission, roles []Role) bool {
-	return CalculateTotalPermissions(roles)&required != 0
+// PermissionsForRoles returns the OR‑ed Permission mask for the given roles.
+func PermissionsForRoles(roles ...Role) Permission {
+	var p Permission
+	for _, role := range roles {
+		p |= role.Permissions
+	}
+	return p
+}
+
+// PermissionsForRolesStr returns the OR‑ed Permission mask for the given role names.
+// Unknown names yield an error.
+func PermissionsForRolesStr(roleNames ...string) (Permission, error) {
+	var p Permission
+	for _, raw := range roleNames {
+		if role, ok := AllRoles[strings.ToLower(strings.TrimSpace(raw))]; ok {
+			p |= role.Permissions
+		} else {
+			return 0, fmt.Errorf("invalid role: %s", raw)
+		}
+	}
+	return p, nil
+}
+
+// HasPermission checks if the given permission is present in the permission mask
+func HasPermission(required Permission, perms Permission) bool {
+	return perms&required != 0
+}
+
+// HasPermissionFromRoles checks if any of the roles contain the required permission
+func HasPermissionFromRoles(required Permission, roles ...Role) bool {
+	return HasPermission(required, PermissionsForRoles(roles...))
 }
 
 // ParseRoles parses a comma-separated string of role names and returns the corresponding Role structs
 func ParseRoles(roleStr string) ([]Role, error) {
-	var roles []Role
-	roleNames := strings.Split(roleStr, ",")
-	for _, name := range roleNames {
-		name = strings.TrimSpace(name)
-		found := false
-		for _, role := range AllRoles {
-			if role.Name == name {
-				roles = append(roles, role)
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("invalid role: %s", name)
+	var out []Role
+	for _, raw := range strings.Split(roleStr, ",") {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if role, ok := AllRoles[name]; ok {
+			out = append(out, role)
+		} else {
+			return nil, fmt.Errorf("invalid role: %s", raw)
 		}
 	}
-	return roles, nil
+	return out, nil
 }

@@ -59,7 +59,7 @@ func (s *server) ControlStream(stream pb.P2PTClient_ControlStreamServer) error {
 
 		switch x := in.Payload.(type) {
 		case *pb.ClientMsg_QueueCmd:
-			if err := s.ctrl.Handle(x.QueueCmd, pid, roles.All, s.hub); err != nil {
+			if err := s.ctrl.Handle(x.QueueCmd, pid, roles.PermAll, s.hub); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure

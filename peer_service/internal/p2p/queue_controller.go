@@ -31,7 +31,7 @@ func (qc *QueueController) snapshot() *pb.ServerMsg {
 }
 
 func (qc *QueueController) Handle(cmd *pb.QueueCmd, sender peer.ID, perms roles.Permission, hub *Hub) error {
-	if !roles.HasPermission(roles.Queue, []roles.Role{{Permissions: perms}}) {
+	if !roles.HasPermission(roles.PermQueue, perms) {
 		return fmt.Errorf("permission denied: missing Queue perm")
 	}
 
