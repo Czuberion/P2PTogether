@@ -14,13 +14,14 @@ import (
 	"syscall"
 	"time"
 
+	libp2p "github.com/libp2p/go-libp2p"
+	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
-	"peer_service/internal/roles"
 	pb "peer_service/proto/client" // local import for client proto
 )
 
@@ -34,6 +35,9 @@ type server struct {
 
 	// owns the in-memory Queue and applies QueueCmds
 	ctrl *p2p.QueueController
+
+	// Peer runtime state
+	node *p2p.Node
 }
 
 func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*pb.ServiceInfo, error) {
@@ -59,7 +63,8 @@ func (s *server) ControlStream(stream pb.P2PTClient_ControlStreamServer) error {
 
 		switch x := in.Payload.(type) {
 		case *pb.ClientMsg_QueueCmd:
-			if err := s.ctrl.Handle(x.QueueCmd, pid, roles.PermAll, s.hub); err != nil {
+			perms := s.node.Permissions()
+			if err := s.ctrl.Handle(x.QueueCmd, pid, perms, s.hub); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
@@ -68,6 +73,16 @@ func (s *server) ControlStream(stream pb.P2PTClient_ControlStreamServer) error {
 			log.Printf("Received unhandled message type from %s", pid.String())
 		}
 	}
+}
+
+// stubHost returns a throw‑away libp2p host so the service compiles/run s
+// without full networking setup.  Replace with real construction later.
+func stubHost() host.Host {
+	h, err := libp2p.New()
+	if err != nil {
+		log.Fatalf("libp2p host init failed: %v", err)
+	}
+	return h
 }
 
 func main() {
@@ -86,6 +101,7 @@ func main() {
 
 	// --- mini‑HLS in‑RAM buffer ---
 	rb := media.NewRingBuffer(120) // 120 s window
+	statusCh := media.StartStatusTicker(rb, 5*time.Second)
 	plH, segH := media.Handler(rb)
 
 	httpMux := http.NewServeMux()
@@ -120,11 +136,24 @@ func main() {
 	hub := p2p.NewHub()
 	ctrl := p2p.NewQueueController()
 
+	// TODO: real libp2p host construction
+	node := p2p.NewNode(stubHost(), hlsPort)
+
 	pb.RegisterP2PTClientServer(grpcServer, &server{
 		hlsPort: hlsPort,
 		hub:     hub,
 		ctrl:    ctrl,
+		node:    node,
 	})
+
+	// fan‑out StreamStatus to every connected client
+	go func() {
+		for st := range statusCh {
+			hub.Broadcast(&pb.ServerMsg{
+				Payload: &pb.ServerMsg_StreamStatus{StreamStatus: st},
+			})
+		}
+	}()
 
 	// Goroutine to start the gRPC server
 	go func() {
