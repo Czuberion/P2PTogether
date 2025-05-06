@@ -5,6 +5,9 @@ import "google/protobuf/empty.proto";
 import "p2p/queue.proto";
 import "p2p/role.proto";
 import "p2p/streaming.proto";
+import "p2p/playback.proto";
+import "p2p/chat.proto";
+import "p2p/analytics.proto";
 
 option go_package = "peer_service/proto;client";
 
@@ -21,8 +24,8 @@ message ClientMsg {
   // oneof { your various client→service payloads go here }
   oneof payload {
     client.p2p.QueueCmd queue_cmd = 1;
-    // PlaybackCmd  p_cmd   = 2;
-    // RoleCmd      role_cmd= 3;
+    client.p2p.PlaybackCmd playback_cmd = 2;
+    client.p2p.ChatCmd chat_cmd = 3;
   }
 }
 
@@ -32,6 +35,8 @@ message ServerMsg {
     client.p2p.QueueUpdate queue_update = 1;
     client.p2p.StreamStatus stream_status = 2;
     client.p2p.RoleUpdate role_update = 3;
+    client.p2p.ChatMsg chat_msg = 4;
+    client.p2p.AnalyticsUpdate analytics_update = 5;
   }
 }
 

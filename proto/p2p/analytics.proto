@@ -1,0 +1,18 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+// ——— Per‑peer traffic counters ———
+message TrafficSample {
+  string peer_id = 1;    // libp2p peer.ID (base58‑btc)
+  uint64 bytes_up = 2;   // cumulative
+  uint64 bytes_down = 3; // cumulative
+}
+
+// ——— Aggregated stats ———
+message AnalyticsUpdate {
+  uint32 total_peers = 1;              // current mesh size
+  repeated TrafficSample per_peer = 8; // optional ‑ can be empty on LAN‑MVP
+  int64 hlc_ts = 9;                    // sender’s Hybrid Logical Clock
+}

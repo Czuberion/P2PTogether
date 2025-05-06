@@ -15,7 +15,7 @@ message ChatCmd {
 
 // Chat messages broadcast by the Peer Service to all clients.
 message ChatMsg {
-  // Service-generated unique ID for this message.
+  // Service-generated ULID for this message.
   string message_id = 1;
   // Peer.ID (string form) of the sender.
   string sender = 2;

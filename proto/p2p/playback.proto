@@ -1,0 +1,16 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+message PlaybackCmd {
+  enum Type {
+    PLAY = 0;
+    PAUSE = 1;
+    SEEK = 2;  // value = target seconds
+    SPEED = 3; // value = multiplier (e.g. 1.25)
+  }
+  Type type = 1;
+  double value = 2;
+  int64 hlc_ts = 3; // Hybrid Logical Clock
+}
