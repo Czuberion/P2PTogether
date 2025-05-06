@@ -45,24 +45,6 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
         return -1;
     }
 
-    // --- Open and immediately close the control stream (placeholder) ---
-    qInfo() << "Attempting to open control stream...";
-    auto stream = grpcClient.openControlStream();
-    if (!stream) {
-        qCritical() << "Failed to open gRPC control stream.";
-        return -1;
-    }
-    qInfo() << "Control stream opened. Closing immediately (stub).";
-    stream->WritesDone();
-    grpc::Status status = stream->Finish();
-    if (!status.ok()) {
-        qWarning() << "Control stream Finish() failed:"
-                   << status.error_message().c_str();
-        // Non-fatal for now, but indicates potential issue
-    } else {
-        qInfo() << "Control stream closed successfully.";
-    }
-
     // --- Create MpvManager with the HLS URL provided by the Peer Service ---
     QString hlsUrl = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
     player::MpvManager mpvManager(hlsUrl);
@@ -76,8 +58,19 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     // Create thread and worker without parents initially
     QThread* netThread = new QThread();
     auto worker        = new P2P::ControlStreamWorker(
-        std::make_unique<P2P::GrpcClient>(std::move(grpcClient)),
-        nullptr); // No parent
+        std::make_unique<P2P::GrpcClient>(std::move(grpcClient)), nullptr);
+
+    // ---- observe the worker for debugging / UX feedback ----
+    QObject::connect(worker, &P2P::ControlStreamWorker::finished, &window,
+                     [](const QString& reason) {
+                         qWarning() << "[control‑stream]" << reason;
+                     });
+
+    QObject::connect(worker, &P2P::ControlStreamWorker::serverMsg, &window,
+                     [](const client::ServerMsg& msg) {
+                         qDebug() << "[control‑stream] received payload type"
+                                  << msg.payload_case();
+                     });
 
     worker->moveToThread(netThread);
 
