@@ -1,0 +1,28 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+// Chat commands sent from a client to the Peer Service.
+message ChatCmd {
+  // The text of the chat message.
+  string text = 1;
+  // Hybrid Logical Clock timestamp for ordering.
+  int64 hlc_ts = 2;
+  // If non-empty, indicates this is a reply to the given message_id.
+  string reply_to = 3;
+}
+
+// Chat messages broadcast by the Peer Service to all clients.
+message ChatMsg {
+  // Service-generated unique ID for this message.
+  string message_id = 1;
+  // Peer.ID (string form) of the sender.
+  string sender = 2;
+  // The text of the chat message.
+  string text = 3;
+  // Hybrid Logical Clock timestamp for ordering.
+  int64 hlc_ts = 4;
+  // If non-empty, indicates this is a reply to the given message_id.
+  string reply_to = 5;
+}
