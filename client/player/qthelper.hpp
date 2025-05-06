@@ -12,8 +12,7 @@
  * \see player/mpvwidget.h
  * \see player/mpvwidget.cpp
  */
-#ifndef LIBMPV_QTHELPER_H_
-#define LIBMPV_QTHELPER_H_
+#pragma once
 
 #include <mpv/client.h>
 
@@ -345,5 +344,3 @@ static inline QVariant command(mpv_handle* ctx, const QVariant& args) {
 } // namespace mpv
 
 Q_DECLARE_METATYPE(mpv::qt::ErrorReturn)
-
-#endif

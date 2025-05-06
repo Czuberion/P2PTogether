@@ -12,8 +12,7 @@
  * \see gui/video_panel.h
  * \see player/mpv_manager.h
  */
-#ifndef APP_H
-#define APP_H
+#pragma once
 
 #include "p2p/peer.h"
 #include <QApplication>
@@ -33,5 +32,3 @@ namespace gui {
 int runGUI(P2P::Peer* peer);
 
 } // namespace gui
-
-#endif // APP_H

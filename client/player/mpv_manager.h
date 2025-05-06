@@ -12,8 +12,7 @@
  * \see PRD section 6
  * \see SRS 2.1, 3.1.3
  */
-#ifndef MPV_MANAGER_H
-#define MPV_MANAGER_H
+#pragma once
 
 #include <QNetworkAccessManager>
 #include <QObject>
@@ -111,5 +110,3 @@ Q_SIGNALS:
 };
 
 } // namespace player
-
-#endif // MPV_MANAGER_H

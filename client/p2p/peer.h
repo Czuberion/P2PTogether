@@ -10,8 +10,7 @@
  * \see PRD section 6
  * \see SRS 2.1
  */
-#ifndef PEER_H
-#define PEER_H
+#pragma once
 
 #include <iostream>
 #include <string>
@@ -44,5 +43,3 @@ inline bool hasQueuePermission(const std::vector<Role>& roles) {
 }
 
 } // namespace P2P
-
-#endif // PEER_H

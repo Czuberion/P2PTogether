@@ -1,5 +1,4 @@
-#ifndef P2P_TRANSPORT_GRPC_CLIENT_H
-#define P2P_TRANSPORT_GRPC_CLIENT_H
+#pragma once
 
 #include <grpcpp/grpcpp.h>
 #include <memory>
@@ -39,5 +38,3 @@ private:
 };
 
 } // namespace P2P
-
-#endif // P2P_TRANSPORT_GRPC_CLIENT_H

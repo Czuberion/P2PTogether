@@ -9,8 +9,7 @@
  * \see PRD F‑M3, F‑S2
  * \see SRS SR‑CQ‑1, SR‑AN‑1
  */
-#ifndef RIGHT_PANEL_H
-#define RIGHT_PANEL_H
+#pragma once
 
 #include "p2p/peer.h"
 #include <QMainWindow>
@@ -39,5 +38,3 @@ extern std::function<void()> QueueButtonsRefreshCallback;
 QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window);
 
 } // namespace gui
-
-#endif // RIGHT_PANEL_H

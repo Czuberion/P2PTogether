@@ -9,8 +9,7 @@
  * \see PRD F‑M2, F‑M4
  * \see SRS SR‑UI‑1, SR‑UI‑4
  */
-#ifndef MENUS_H
-#define MENUS_H
+#pragma once
 
 #include "p2p/peer.h"
 #include <QMainWindow>
@@ -44,5 +43,3 @@ void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,
 extern std::function<void()> SidebarToggleCallback;
 
 } // namespace gui
-
-#endif // MENUS_H

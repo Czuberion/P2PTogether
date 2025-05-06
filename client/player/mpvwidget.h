@@ -12,8 +12,7 @@
  * \see player/mpvwidget.cpp
  * \see player/qthelper.hpp
  */
-#ifndef MPVWIDGET_H
-#define MPVWIDGET_H
+#pragma once
 
 #include "qthelper.hpp"
 #include <QtOpenGLWidgets/QOpenGLWidget>
@@ -51,5 +50,3 @@ private:
 };
 
 } // namespace player
-
-#endif // MPVWIDGET_H

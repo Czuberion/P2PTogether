@@ -11,8 +11,7 @@
  * \see PRD F‑M2, F‑M4
  * \see SRS SR‑UI‑2, SR‑UI‑3
  */
-#ifndef VIDEO_PANEL_H
-#define VIDEO_PANEL_H
+#pragma once
 
 #include <QMainWindow> // Needed for fullscreen toggle
 #include <QWidget>
@@ -38,5 +37,3 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
                           QMainWindow* mainWindow);
 
 } // namespace gui
-
-#endif // VIDEO_PANEL_H

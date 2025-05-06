@@ -1,5 +1,4 @@
-#ifndef CONTROL_STREAM_WORKER_H
-#define CONTROL_STREAM_WORKER_H
+#pragma once
 
 #include <QObject>
 #include <atomic>
@@ -50,5 +49,3 @@ private:
 };
 
 } // namespace P2P
-
-#endif // CONTROL_STREAM_WORKER_H
