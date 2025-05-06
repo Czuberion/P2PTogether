@@ -9,9 +9,6 @@
 
 namespace P2P {
 
-// Use the generated ServiceInfo message directly
-using p2p::ServiceInfo;
-
 class GrpcClient {
 public:
     // Constructor takes the server address
@@ -19,22 +16,24 @@ public:
 
     // Calls the GetServiceInfo RPC
     // Returns the generated p2p::ServiceInfo message
-    p2p::ServiceInfo getServiceInfo();
+    client::ServiceInfo getServiceInfo();
 
     // Opens the bidirectional control stream
     // Uses the generated p2p::ClientMsg and p2p::ServerMsg
-    std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+    std::unique_ptr<
+        grpc::ClientReaderWriter<client::ClientMsg, client::ServerMsg>>
     openControlStream();
 
     // Opens the bidirectional control stream.
     // Lets the caller provide (and later cancel) the context
-    std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+    std::unique_ptr<
+        grpc::ClientReaderWriter<client::ClientMsg, client::ServerMsg>>
     openControlStream(grpc::ClientContext& ctx);
 
 private:
     std::shared_ptr<grpc::Channel> channel_;
     // Use the correct generated stub type: p2p::P2PTClient::Stub
-    std::unique_ptr<p2p::P2PTClient::Stub> stub_;
+    std::unique_ptr<client::P2PTClient::Stub> stub_;
 };
 
 } // namespace P2P

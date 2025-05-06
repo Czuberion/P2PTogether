@@ -1,0 +1,28 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+/* —— Commands —— */
+message QueueCmd {
+  enum Type {
+    APPEND = 0;
+    REMOVE = 1;
+    NEXT = 2;
+    CLEAR = 3;
+  }
+  Type type = 1;
+  string file_path = 2; // meaningful only for APPEND
+  int32 index = 3;      // position for REMOVE (-1 ignored)
+  int64 hlc_ts = 4;
+}
+
+/* —— Events —— */
+message QueueUpdate { repeated QueueItem items = 1; }
+
+message QueueItem {
+  string file_path = 1;
+  string stored_by = 2; // peer.ID
+  string added_by = 3;  // peer.ID
+  int64 hlc_ts = 4;
+}

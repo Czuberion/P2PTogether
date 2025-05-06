@@ -44,8 +44,13 @@ set(HEADERS
 # --- C++ gRPC/protobuf stub generation ---
 find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED) # Correct executable name
 find_program(PROTOC_EXECUTABLE protoc REQUIRED)
-set(CLIENT_PROTO "${CMAKE_SOURCE_DIR}/proto/client.proto")
+set(PROTO_ROOT "${CMAKE_SOURCE_DIR}/proto")
+set(CLIENT_PROTO "${PROTO_ROOT}/client.proto")
 set(CPP_CLIENT_PROTO_OUT_DIR "${CMAKE_SOURCE_DIR}/client/proto")
+
+file(GLOB_RECURSE ALL_PROTO_FILES
+     "${PROTO_ROOT}/*.proto"
+)
 
 add_custom_command(
   OUTPUT ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc
@@ -54,18 +59,18 @@ add_custom_command(
     --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN} # Specify the plugin path
     --cpp_out=${CPP_CLIENT_PROTO_OUT_DIR}
     --grpc_out=${CPP_CLIENT_PROTO_OUT_DIR}
-    -I ${CMAKE_SOURCE_DIR}/proto
-    ${CLIENT_PROTO}
-  DEPENDS ${CLIENT_PROTO} ${GRPC_CPP_PLUGIN}
+    -I ${PROTO_ROOT}
+    ${ALL_PROTO_FILES}
+  DEPENDS ${ALL_PROTO_FILES} ${GRPC_CPP_PLUGIN}
   COMMENT "Generating C++ gRPC/protobuf code for client.proto"
   VERBATIM
 )
 
 # Add generated sources to build
-list(APPEND SOURCES
-  ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc
-  ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc
+file(GLOB_RECURSE CPP_PROTO_SRCS
+  "${CPP_CLIENT_PROTO_OUT_DIR}/*.pb.cc"
 )
+list(APPEND SOURCES ${CPP_PROTO_SRCS})
 
 add_executable(P2PTogether ${SOURCES} ${HEADERS})
 
@@ -192,7 +197,7 @@ add_dependencies(go_unit_tests go_workspace generate_go_client_proto)
 add_dependencies(go_vet       go_workspace generate_go_client_proto)
 
 # --- Go client proto generation ---
-set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto/client")
+set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto")
 
 add_custom_command(
   OUTPUT ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
@@ -200,9 +205,9 @@ add_custom_command(
   COMMAND ${PROTOC_EXECUTABLE}
     --go_out=paths=source_relative:${GO_CLIENT_OUT_DIR}
     --go-grpc_out=paths=source_relative:${GO_CLIENT_OUT_DIR}
-    -I ${CMAKE_SOURCE_DIR}/proto
-    ${CLIENT_PROTO}
-  DEPENDS ${CLIENT_PROTO}
+    -I ${PROTO_ROOT}
+    ${ALL_PROTO_FILES}
+  DEPENDS ${ALL_PROTO_FILES}
   COMMENT "Generating Go code for client.proto"
   VERBATIM
 )

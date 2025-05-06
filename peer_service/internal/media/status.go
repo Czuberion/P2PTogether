@@ -1,12 +1,12 @@
 package media
 
 import (
-	pb "peer_service/proto/client"
+	p2ppb "peer_service/proto/p2p"
 	"time"
 )
 
-func StartStatusTicker(rb *RingBuffer, every time.Duration) <-chan *pb.StreamStatus {
-	out := make(chan *pb.StreamStatus, 8)
+func StartStatusTicker(rb *RingBuffer, every time.Duration) <-chan *p2ppb.StreamStatus {
+	out := make(chan *p2ppb.StreamStatus, 8)
 
 	go func() {
 		ticker := time.NewTicker(every)
@@ -17,7 +17,7 @@ func StartStatusTicker(rb *RingBuffer, every time.Duration) <-chan *pb.StreamSta
 			if base == 0 { // encoder not yet live
 				continue
 			}
-			out <- &pb.StreamStatus{
+			out <- &p2ppb.StreamStatus{
 				Sequence: base,
 				// FilePath, PTS etc. can be filled once ingest provides them
 				IsLive: true,

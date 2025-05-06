@@ -30,8 +30,8 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
         QString("127.0.0.1:%1").arg(grpcPort).toStdString());
     quint32 hlsPort = 0;
     try {
-        p2p::ServiceInfo serviceInfo = grpcClient.getServiceInfo();
-        hlsPort                      = serviceInfo.hls_port();
+        client::ServiceInfo serviceInfo = grpcClient.getServiceInfo();
+        hlsPort                         = serviceInfo.hls_port();
         qInfo() << "Successfully fetched HLS port from peer service:"
                 << hlsPort;
     } catch (const std::runtime_error& e) {

@@ -24,12 +24,12 @@ import (
 
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
-	pb "peer_service/proto/client" // local import for client proto
+	clientpb "peer_service/proto" // local import for client proto
 )
 
 // server implements the gRPC service defined in proto.
 type server struct {
-	pb.UnimplementedP2PTClientServer
+	clientpb.UnimplementedP2PTClientServer
 	hlsPort uint32
 
 	// fan-out for ServerMsg broadcasts
@@ -42,11 +42,11 @@ type server struct {
 	node *p2p.Node
 }
 
-func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*pb.ServiceInfo, error) {
-	return &pb.ServiceInfo{HlsPort: s.hlsPort}, nil
+func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientpb.ServiceInfo, error) {
+	return &clientpb.ServiceInfo{HlsPort: s.hlsPort}, nil
 }
 
-func (s *server) ControlStream(stream pb.P2PTClient_ControlStreamServer) error {
+func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) error {
 	pid := peer.ID("stub") // later: real peer ID from auth layer
 	s.hub.Add(pid.String(), stream)
 	log.Printf("Client %s connected.", pid.String()) // Log connection
@@ -64,7 +64,7 @@ func (s *server) ControlStream(stream pb.P2PTClient_ControlStreamServer) error {
 		}
 
 		switch x := in.Payload.(type) {
-		case *pb.ClientMsg_QueueCmd:
+		case *clientpb.ClientMsg_QueueCmd:
 			perms := s.node.Permissions()
 			if err := s.ctrl.Handle(x.QueueCmd, pid, perms, s.hub); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
@@ -176,7 +176,7 @@ func main() {
 
 	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
 
-	pb.RegisterP2PTClientServer(grpcServer, &server{
+	clientpb.RegisterP2PTClientServer(grpcServer, &server{
 		hlsPort: hlsPort,
 		hub:     hub,
 		ctrl:    ctrl,
@@ -186,8 +186,8 @@ func main() {
 	// fan‑out StreamStatus to every connected client
 	go func() {
 		for st := range statusCh {
-			hub.Broadcast(&pb.ServerMsg{
-				Payload: &pb.ServerMsg_StreamStatus{StreamStatus: st},
+			hub.Broadcast(&clientpb.ServerMsg{
+				Payload: &clientpb.ServerMsg_StreamStatus{StreamStatus: st},
 			})
 		}
 	}()

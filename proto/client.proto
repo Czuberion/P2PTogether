@@ -1,83 +1,45 @@
 syntax = "proto3";
-package p2p;
+package client;
 
 import "google/protobuf/empty.proto";
+import "p2p/queue.proto";
+import "p2p/role.proto";
+import "p2p/streaming.proto";
 
-option go_package = "peer_service/proto/client";
+option go_package = "peer_service/proto;client";
 
-// ––– Service-level messages –––
+/* ——— Service‑level ——— */
 
 message ServiceInfo {
-  // HTTP port where this peer's mini-HLS server is listening on localhost.
+  // HTTP port where this peer's HLS server is listening on localhost.
   uint32 hls_port = 1;
 }
 
-// Sent by the Service whenever the encoder (re)starts or every 5 s while live.
-message StreamStatus {
-  string file_path = 1; // absolute path on Streamer
-  uint32 sequence = 2;  // EXT‑X‑MEDIA‑SEQUENCE currently live
-  double pts = 3;       // start PTS of this sequence [s]
-  double duration = 4;  // total length; 0 = continuing live
-  bool is_live = 5;     // true ⇒ duration is still growing
-}
-
-// Broadcast whenever a peer’s effective permissions change.
-message RoleUpdate {
-  string peer_id = 1;     // libp2p peer.ID (string form)
-  uint32 permissions = 2; // bit‑mask (see roles.Permission)
-  int64 hlc_ts = 3;       // Hybrid Logical Clock ms
-}
-
-// ––– Streaming wrappers –––
+/* ——— Streaming wrappers ——— */
 
 message ClientMsg {
   // oneof { your various client→service payloads go here }
   oneof payload {
-    QueueCmd queue_cmd = 1;
-    // PlaybackCmd  p_cmd     = 2; // reserved for next slice
-    // RoleCmd      role_cmd  = 3; // reserved
+    client.p2p.QueueCmd queue_cmd = 1;
+    // PlaybackCmd  p_cmd   = 2;
+    // RoleCmd      role_cmd= 3;
   }
 }
 
 message ServerMsg {
   // oneof { your various service→client payloads go here }
   oneof payload {
-    QueueUpdate queue_update = 1;
-    StreamStatus stream_status = 2;
-    RoleUpdate role_update = 3;
+    client.p2p.QueueUpdate queue_update = 1;
+    client.p2p.StreamStatus stream_status = 2;
+    client.p2p.RoleUpdate role_update = 3;
   }
 }
 
-// ––– RPC service for Client ↔ Peer Service –––
+/* ——— RPC (Client ↔ Peer Service) ——— */
 
 service P2PTClient {
   // Tell me about your HLS port
   rpc GetServiceInfo(google.protobuf.Empty) returns (ServiceInfo);
-
-  // Bidirectional control & chat stream
+  // Bidirectional control
   rpc ControlStream(stream ClientMsg) returns (stream ServerMsg);
-}
-
-// Queue
-
-message QueueCmd {
-  enum Type {
-    APPEND = 0;
-    REMOVE = 1;
-    NEXT = 2;
-    CLEAR = 3;
-  }
-  Type type = 1;
-  string file_path = 2; // meaningful only for APPEND
-  int32 index = 3;      // position for REMOVE (-1 ignored)
-  int64 hlc_ts = 4;
-}
-
-message QueueUpdate { repeated QueueItem items = 1; }
-
-message QueueItem {
-  string file_path = 1;
-  string stored_by = 2; // peer.ID as string
-  string added_by = 3;  // peer.ID
-  int64 hlc_ts = 4;
 }

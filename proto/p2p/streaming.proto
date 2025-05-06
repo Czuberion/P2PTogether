@@ -1,0 +1,13 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+// Sent by the Service whenever the encoder (re)starts or every 5 s while live.
+message StreamStatus {
+  string file_path = 1; // absolute path on Streamer
+  uint32 sequence = 2;  // EXT‑X‑MEDIA‑SEQUENCE currently live
+  double pts = 3;       // start PTS of this sequence [s]
+  double duration = 4;  // total length; 0 = continuing live
+  bool is_live = 5;     // true ⇒ duration is still growing
+}

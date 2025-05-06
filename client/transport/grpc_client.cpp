@@ -14,17 +14,17 @@ GrpcClient::GrpcClient(const std::string& target_address) {
                                  target_address);
     }
     // Use the correct generated stub type: p2p::P2PTClient::NewStub
-    stub_ = p2p::P2PTClient::NewStub(channel_);
+    stub_ = client::P2PTClient::NewStub(channel_);
     if (!stub_) {
         throw std::runtime_error("Failed to create gRPC stub");
     }
 }
 
 // Return the generated p2p::ServiceInfo message
-p2p::ServiceInfo GrpcClient::getServiceInfo() {
+client::ServiceInfo GrpcClient::getServiceInfo() {
     // Use google::protobuf::Empty for the request
     google::protobuf::Empty request;
-    p2p::ServiceInfo response;
+    client::ServiceInfo response;
     grpc::ClientContext context;
 
     // Use the correct stub_ type
@@ -39,7 +39,7 @@ p2p::ServiceInfo GrpcClient::getServiceInfo() {
 }
 
 // Use the generated p2p::ClientMsg and p2p::ServerMsg
-std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+std::unique_ptr<grpc::ClientReaderWriter<client::ClientMsg, client::ServerMsg>>
 GrpcClient::openControlStream() {
     auto context = std::make_unique<grpc::ClientContext>();
     // Use the correct stub_ type
@@ -47,7 +47,7 @@ GrpcClient::openControlStream() {
 }
 
 // openControlStream with external context
-std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+std::unique_ptr<grpc::ClientReaderWriter<client::ClientMsg, client::ServerMsg>>
 GrpcClient::openControlStream(grpc::ClientContext& ctx) {
     // caller owns ctx lifetime & cancellation
     return stub_->ControlStream(&ctx);

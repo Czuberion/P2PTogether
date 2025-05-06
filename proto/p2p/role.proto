@@ -1,0 +1,11 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+// Broadcast whenever a peer’s effective permissions change.
+message RoleUpdate {
+  string peer_id = 1;     // libp2p peer.ID (string form)
+  uint32 permissions = 2; // bit‑mask (see roles.Permission)
+  int64 hlc_ts = 3;       // Hybrid Logical Clock ms
+}

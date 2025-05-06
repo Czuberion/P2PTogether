@@ -24,7 +24,7 @@ public:
 
 public Q_SLOTS:
     //! enqueue a ClientMsg to be written on the stream
-    void send(const p2p::ClientMsg& msg);
+    void send(const client::ClientMsg& msg);
     //! kicks off the blocking read-loop
     void start();
     //! ask the worker to shut down gracefully
@@ -32,7 +32,7 @@ public Q_SLOTS:
 
 Q_SIGNALS:
     //! emitted on **any** ServerMsg (slot in GUI decides what to do)
-    void serverMsg(const p2p::ServerMsg& msg);
+    void serverMsg(const client::ServerMsg& msg);
 
     //! emitted if the stream breaks or worker stops itself
     void finished(const QString& reason);
@@ -43,7 +43,8 @@ private:
     std::unique_ptr<grpc::ClientContext> ctx_;
 
     std::unique_ptr<GrpcClient> client_;
-    std::unique_ptr<grpc::ClientReaderWriter<p2p::ClientMsg, p2p::ServerMsg>>
+    std::unique_ptr<
+        grpc::ClientReaderWriter<client::ClientMsg, client::ServerMsg>>
         stream_;
     std::mutex txMu_; // protects *stream_ writes
 };

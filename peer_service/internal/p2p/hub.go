@@ -3,12 +3,12 @@ package p2p
 import (
 	"sync"
 
-	pb "peer_service/proto/client"
+	clientpb "peer_service/proto"
 )
 
 type subscriber struct {
 	peerID string
-	stream pb.P2PTClient_ControlStreamServer
+	stream clientpb.P2PTClient_ControlStreamServer
 }
 
 type Hub struct {
@@ -18,7 +18,7 @@ type Hub struct {
 
 func NewHub() *Hub { return &Hub{subs: map[string]subscriber{}} }
 
-func (h *Hub) Add(id string, s pb.P2PTClient_ControlStreamServer) {
+func (h *Hub) Add(id string, s clientpb.P2PTClient_ControlStreamServer) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.subs[id] = subscriber{id, s}
@@ -30,7 +30,7 @@ func (h *Hub) Remove(id string) {
 	delete(h.subs, id)
 }
 
-func (h *Hub) Broadcast(msg *pb.ServerMsg) {
+func (h *Hub) Broadcast(msg *clientpb.ServerMsg) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for id, sub := range h.subs {
