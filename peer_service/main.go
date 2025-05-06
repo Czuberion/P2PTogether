@@ -106,7 +106,7 @@ func buildHost(ctx context.Context) host.Host {
 func main() {
 	// flags
 	var grpcPort int
-	flag.IntVar(&grpcPort, "grpc-port", 8268, "gRPC listen port")
+	flag.IntVar(&grpcPort, "grpc-port", 0, "gRPC listen port")
 	flag.Parse()
 
 	// 1) Start HTTP mini-HLS on a random port

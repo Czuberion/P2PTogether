@@ -14,8 +14,8 @@ using p2p::ServiceInfo;
 
 class GrpcClient {
 public:
-    // Constructor takes the server address (e.g., "127.0.0.1:8268")
-    explicit GrpcClient(const std::string& target_address = "127.0.0.1:8268");
+    // Constructor takes the server address
+    explicit GrpcClient(const std::string& target_address = "127.0.0.1:0");
 
     // Calls the GetServiceInfo RPC
     // Returns the generated p2p::ServiceInfo message
