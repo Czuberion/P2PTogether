@@ -25,9 +25,6 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     // This is a simple workaround for potential race conditions on startup.
     QThread::msleep(500); // Wait for 500 milliseconds
 
-    // --- Instantiate gRPC Client and get HLS Port ---
-    // P2P::GrpcClient grpcClient; // Assumes default address "127.0.0.1:8268"
-
     // --- Instantiate gRPC Client pointed at the dynamic port  ---
     P2P::GrpcClient grpcClient(
         QString("127.0.0.1:%1").arg(grpcPort).toStdString());

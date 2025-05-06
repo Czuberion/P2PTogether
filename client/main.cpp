@@ -74,8 +74,6 @@ int main(int argc, char* argv[]) {
                                      << peerServiceProcess.errorString();
                      });
 
-    // QStringList args = {"--grpc-port=8268"};
-
     // Pass the chosen port to the daemon
     QStringList args = {QString("--grpc-port=%1").arg(grpcPort)};
 

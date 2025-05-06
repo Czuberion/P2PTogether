@@ -27,6 +27,7 @@ namespace gui {
  *
  * \param peer Pointer to the P2P::Peer dummy object representing the local
  * user.
+ * \param grpcPort The gRPC port for the Peer Service.
  * \return The exit code of the QApplication event loop.
  */
 int runGUI(P2P::Peer* peer, quint16 grpcPort);
