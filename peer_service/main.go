@@ -15,8 +15,10 @@ import (
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
-	host "github.com/libp2p/go-libp2p/core/host"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -75,13 +77,29 @@ func (s *server) ControlStream(stream pb.P2PTClient_ControlStreamServer) error {
 	}
 }
 
-// stubHost returns a throw‑away libp2p host so the service compiles/run s
-// without full networking setup.  Replace with real construction later.
-func stubHost() host.Host {
-	h, err := libp2p.New()
+// mdnsNotifee prints every peer it discovers on the LAN.
+type mdnsNotifee struct{}
+
+func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
+	log.Printf("[mDNS] discovered %s\n", pi.ID)
+}
+
+// buildHost sets up a real libp2p Host plus mDNS discovery.
+func buildHost(ctx context.Context) host.Host {
+	h, err := libp2p.New(
+		libp2p.ListenAddrStrings(
+			"/ip4/0.0.0.0/tcp/0",
+			"/ip6/::/tcp/0",
+		),
+	)
 	if err != nil {
 		log.Fatalf("libp2p host init failed: %v", err)
 	}
+
+	// mDNS for zero-conf LAN discovery
+	svc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{})
+	_ = svc // service starts background discovery
+
 	return h
 }
 
@@ -136,8 +154,27 @@ func main() {
 	hub := p2p.NewHub()
 	ctrl := p2p.NewQueueController()
 
-	// TODO: real libp2p host construction
-	node := p2p.NewNode(stubHost(), hlsPort)
+	// 3) libp2p + GossipSub
+
+	ctx := context.Background()
+
+	lhost := buildHost(ctx)
+	node := p2p.NewNode(lhost, hlsPort)
+
+	ps, err := pubsub.NewGossipSub(ctx, lhost)
+	if err != nil {
+		log.Fatalf("GossipSub init failed: %v", err)
+	}
+
+	videoTopic, err := ps.Join("/p2ptogether/video/1")
+	if err != nil {
+		log.Fatalf("join video topic: %v", err)
+	}
+	// session‑scoped topics – stub “default” until sessions exist
+	chatTopic, _ := ps.Join("/p2ptogether/chat/default")
+	ctrlTopic, _ := ps.Join("/p2ptogether/control/default")
+
+	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
 
 	pb.RegisterP2PTClientServer(grpcServer, &server{
 		hlsPort: hlsPort,
@@ -168,7 +205,7 @@ func main() {
 		log.Println("gRPC server goroutine finished.") // Add log
 	}()
 
-	// 3) Graceful shutdown handling
+	// 4) Graceful shutdown handling
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
