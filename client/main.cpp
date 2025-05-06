@@ -20,6 +20,7 @@
 #include <QProcess>
 #include <QTextStream>
 #include <clocale>
+#include <utils/net.h>
 
 int main(int argc, char* argv[]) {
     // Set up Qt Application context first
@@ -34,6 +35,15 @@ int main(int argc, char* argv[]) {
     QString binDir =
         appInfo.absolutePath(); // Directory containing the executable
     QString peerServicePath = binDir + QDir::separator() + "peer_service";
+
+    // ---  pick an unused localhost port for gRPC  ---
+    quint16 grpcPort = 0;
+    try {
+        grpcPort = findFreeTcpPort(); // <── NEW
+    } catch (const std::exception& e) {
+        qCritical() << e.what();
+        return 1;
+    }
 
     // Check if the peer_service executable exists
     if (!QFileInfo::exists(peerServicePath)) {
@@ -64,7 +74,11 @@ int main(int argc, char* argv[]) {
                                      << peerServiceProcess.errorString();
                      });
 
-    QStringList args = {"--grpc-port=8268"};
+    // QStringList args = {"--grpc-port=8268"};
+
+    // Pass the chosen port to the daemon
+    QStringList args = {QString("--grpc-port=%1").arg(grpcPort)};
+
     qInfo() << "Starting peer_service at:" << peerServicePath
             << "with args:" << args;
     peerServiceProcess.start(peerServicePath, args);
@@ -94,16 +108,18 @@ int main(int argc, char* argv[]) {
     // Construct the Peer object with the chosen peer ID.
     P2P::Peer peer(peerId);
     // Launch the main Qt GUI event loop.
-    int exitCode = gui::runGUI(&peer); // runGUI should return the exec() code
+    int exitCode =
+        gui::runGUI(&peer, grpcPort); // runGUI should return the exec() code
 
     // Ensure the peer service is terminated when the GUI exits
     qInfo() << "Requesting peer_service termination..."; // Add log
-    peerServiceProcess.terminate(); // Sends SIGTERM
+    peerServiceProcess.terminate();                      // Sends SIGTERM
 
     // Wait longer for graceful shutdown (e.g., 10 seconds)
     if (!peerServiceProcess.waitForFinished(10000)) { // Wait up to 10 seconds
-        qWarning() << "Peer service process did not terminate gracefully after 10 seconds. Forcing kill.";
-        peerServiceProcess.kill(); // Force kill if still running
+        qWarning() << "Peer service process did not terminate gracefully after "
+                      "10 seconds. Forcing kill.";
+        peerServiceProcess.kill();                // Force kill if still running
         peerServiceProcess.waitForFinished(1000); // Short wait after kill
     } else {
         qInfo() << "Peer service process terminated gracefully."; // Add log

@@ -38,6 +38,7 @@ set(HEADERS
     client/player/mpv_manager.h
     client/transport/grpc_client.h
     client/transport/control_stream_worker.h
+    client/utils/net.h
 )
 
 # --- C++ gRPC/protobuf stub generation ---

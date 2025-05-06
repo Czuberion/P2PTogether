@@ -16,7 +16,7 @@
 
 namespace gui {
 
-int runGUI(P2P::Peer* peer) {
+int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     // Qt sets the locale in the QApplication constructor, but libmpv requires
     // the LC_NUMERIC category to be set to "C", so change it back.
     setlocale(LC_NUMERIC, "C");
@@ -26,7 +26,11 @@ int runGUI(P2P::Peer* peer) {
     QThread::msleep(500); // Wait for 500 milliseconds
 
     // --- Instantiate gRPC Client and get HLS Port ---
-    P2P::GrpcClient grpcClient; // Assumes default address "127.0.0.1:8268"
+    // P2P::GrpcClient grpcClient; // Assumes default address "127.0.0.1:8268"
+
+    // --- Instantiate gRPC Client pointed at the dynamic port  ---
+    P2P::GrpcClient grpcClient(
+        QString("127.0.0.1:%1").arg(grpcPort).toStdString());
     quint32 hlsPort = 0;
     try {
         p2p::ServiceInfo serviceInfo = grpcClient.getServiceInfo();

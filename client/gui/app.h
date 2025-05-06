@@ -29,6 +29,6 @@ namespace gui {
  * user.
  * \return The exit code of the QApplication event loop.
  */
-int runGUI(P2P::Peer* peer);
+int runGUI(P2P::Peer* peer, quint16 grpcPort);
 
 } // namespace gui
