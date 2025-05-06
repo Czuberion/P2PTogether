@@ -16,7 +16,9 @@ import (
 
 	libp2p "github.com/libp2p/go-libp2p"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"google.golang.org/grpc"
@@ -78,10 +80,19 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 }
 
 // mdnsNotifee prints every peer it discovers on the LAN.
-type mdnsNotifee struct{}
+type mdnsNotifee struct{ h host.Host }
 
 func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
+	if pi.ID == n.h.ID() {
+		return // ignore ourselves
+	}
 	log.Printf("[mDNS] discovered %s\n", pi.ID)
+	// Fire‑and‑forget dial; gossipsub attaches once the connection is up.
+	go func() {
+		if err := n.h.Connect(context.Background(), pi); err != nil {
+			log.Printf("[mDNS] dial %s failed: %v", pi.ID, err)
+		}
+	}()
 }
 
 // buildHost sets up a real libp2p Host plus mDNS discovery.
@@ -97,8 +108,10 @@ func buildHost(ctx context.Context) host.Host {
 	}
 
 	// mDNS for zero-conf LAN discovery
-	svc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{})
-	_ = svc // service starts background discovery
+	mdnsSvc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{h: h})
+	if err := mdnsSvc.Start(); err != nil {
+		log.Fatalf("mDNS start failed: %v", err)
+	}
 
 	return h
 }
@@ -175,6 +188,26 @@ func main() {
 	ctrlTopic, _ := ps.Join("/p2ptogether/control/default")
 
 	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
+
+	//  Peer‑connected / peer‑lost trace
+	sub, err := lhost.EventBus().Subscribe(
+		[]interface{}{new(event.EvtPeerConnectednessChanged)})
+	if err != nil {
+		log.Fatalf("event‑bus subscribe failed: %v", err)
+	}
+	go func() {
+		for ev := range sub.Out() {
+			e := ev.(event.EvtPeerConnectednessChanged)
+			switch e.Connectedness {
+			case network.Connected:
+				log.Printf("[conn] ✔ peer connected: %s", e.Peer)
+			case network.NotConnected:
+				log.Printf("[conn] ✖ peer lost: %s", e.Peer)
+			default:
+				log.Printf("[conn] ↻ peer %s changed: %v", e.Peer, e.Connectedness)
+			}
+		}
+	}()
 
 	clientpb.RegisterP2PTClientServer(grpcServer, &server{
 		hlsPort: hlsPort,
