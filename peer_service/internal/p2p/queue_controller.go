@@ -17,7 +17,12 @@ type QueueController struct {
 	q *Queue
 }
 
-func NewQueueController() *QueueController { return &QueueController{q: &Queue{}} }
+func NewQueueController() *QueueController { return &QueueController{q: NewQueue()} }
+
+// Q returns the underlying queue. Used for read-only operations like checking head.
+func (qc *QueueController) Q() *Queue {
+	return qc.q
+}
 
 func (qc *QueueController) snapshot() *clientpb.ServerMsg {
 	it := qc.q.Items()
@@ -83,4 +88,36 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 	// 3. Trigger queue-to-runner glue logic
 	// handleLocalQueueUpdateForRunner(node, qc, node.ID()) // Assumes handleLocalQueueUpdateForRunner is accessible
 	return nil
+}
+
+// ApplyUpdate replaces the entire local queue state with the items from the received update.
+// This is called when a QueueUpdate is received from GossipSub.
+// node is passed to facilitate calling handleLocalQueueUpdateForRunner.
+func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub, node *Node) {
+	newItems := make([]QueueItem, 0, len(update.Items))
+	for _, pbItem := range update.Items {
+		storedByID, errStored := peer.Decode(pbItem.StoredBy)
+		if errStored != nil {
+			log.Printf("ApplyUpdate: invalid StoredBy peer ID '%s': %v", pbItem.StoredBy, errStored)
+			continue
+		}
+		addedByID, errAdded := peer.Decode(pbItem.AddedBy)
+		if errAdded != nil {
+			log.Printf("ApplyUpdate: invalid AddedBy peer ID '%s': %v", pbItem.AddedBy, errAdded)
+			continue
+		}
+		newItems = append(newItems, QueueItem{
+			FilePath: pbItem.FilePath,
+			StoredBy: storedByID,
+			AddedBy:  addedByID,
+			HlcTs:    pbItem.HlcTs,
+		})
+	}
+	qc.q.ReplaceItems(newItems)
+
+	if localHub != nil { // Notify local GUI client about the change
+		localHub.Broadcast(qc.snapshot())
+	}
+
+	// handleLocalQueueUpdateForRunner(node, qc, node.ID()) // Trigger queue-to-runner glue
 }

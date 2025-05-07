@@ -20,6 +20,37 @@ type Queue struct {
 	mu    sync.Mutex
 }
 
+func NewQueue() *Queue {
+	return &Queue{items: make([]QueueItem, 0)}
+}
+
+// ReplaceItems replaces all items in the queue with the new set.
+func (q *Queue) ReplaceItems(newItems []QueueItem) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.items = make([]QueueItem, len(newItems)) // Create a new slice
+	copy(q.items, newItems)
+}
+
+// Helper methods for controlled access during complex operations (e.g., failover)
+
+func (q *Queue) HeadNoLock() (QueueItem, bool) {
+	if len(q.items) == 0 {
+		return QueueItem{}, false
+	}
+	return q.items[0], true
+}
+func (q *Queue) PopHeadNoLock() {
+	if len(q.items) > 0 {
+		q.items = append(q.items[:0], q.items[1:]...)
+	}
+}
+func (q *Queue) ItemsNoLock() []QueueItem {
+	out := make([]QueueItem, len(q.items))
+	copy(out, q.items)
+	return out
+}
+
 func (q *Queue) Append(it QueueItem) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
