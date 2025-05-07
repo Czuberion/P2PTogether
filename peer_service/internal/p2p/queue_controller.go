@@ -86,13 +86,13 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 	}
 
 	// 3. Trigger queue-to-runner glue logic
-	// handleLocalQueueUpdateForRunner(node, qc, node.ID()) // Assumes handleLocalQueueUpdateForRunner is accessible
+	node.ReactToQueueUpdate(qc)
 	return nil
 }
 
 // ApplyUpdate replaces the entire local queue state with the items from the received update.
 // This is called when a QueueUpdate is received from GossipSub.
-// node is passed to facilitate calling handleLocalQueueUpdateForRunner.
+// node is passed to facilitate calling ReactToQueueUpdate
 func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub, node *Node) {
 	newItems := make([]QueueItem, 0, len(update.Items))
 	for _, pbItem := range update.Items {
@@ -119,5 +119,6 @@ func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub,
 		localHub.Broadcast(qc.snapshot())
 	}
 
-	// handleLocalQueueUpdateForRunner(node, qc, node.ID()) // Trigger queue-to-runner glue
+	// Trigger queue-to-runner glue
+	node.ReactToQueueUpdate(qc)
 }

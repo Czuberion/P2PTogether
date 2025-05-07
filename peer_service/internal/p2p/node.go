@@ -137,7 +137,7 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueContr
 	shouldRun := false
 	if filePath != "" { // An empty filePath signals to stop.
 		// This logic is specific to "if I am StoredBy for head and have PermStream"
-		// It's called by handleLocalQueueUpdateForRunner which already checks this.
+		// It's called by ReactToQueueUpdate which already checks this.
 		// For more generic use, filePath and seqBase would be the sole drivers.
 		// Here, we re-verify based on current queue state.
 		head, ok := qc.Q().Head() // Assuming Q() and Head() are safe or called under appropriate lock
@@ -184,6 +184,26 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueContr
 			}
 		}
 		n.encoderLive = false // Update Node's state
+	}
+}
+
+func (n *Node) ReactToQueueUpdate(qc *QueueController) {
+	log.Printf("Node.ReactToQueueUpdate: Checking runner state for peer %s", n.ID())
+	head, ok := qc.Q().Head()
+	if !ok {
+		log.Println("Node.ReactToQueueUpdate: Queue is empty. Ensuring runner is stopped.")
+		n.EnsureRunnerState("", 0, qc) // Pass qc for re-verification inside EnsureRunnerState
+		return
+	}
+
+	var seqBase uint32
+	if head.StoredBy == n.ID() && roles.HasPermissionFromRoles(roles.PermStream, n.roles...) {
+		seqBase = n.NextMediaSeq() // Or more sophisticated seqBase logic
+		log.Printf("Node.ReactToQueueUpdate: Head item for me. Ensuring runner for: %s, seqBase %d", head.FilePath, seqBase)
+		n.EnsureRunnerState(head.FilePath, seqBase, qc)
+	} else {
+		log.Println("Node.ReactToQueueUpdate: Head item not for me or no PermStream. Ensuring runner is stopped.")
+		n.EnsureRunnerState("", 0, qc)
 	}
 }
 

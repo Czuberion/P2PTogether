@@ -124,6 +124,42 @@ func buildHost(ctx context.Context) host.Host {
 	return h
 }
 
+// pumpQueueUpdates handles incoming QueueUpdate messages from GossipSub.
+func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.QueueController, myID peer.ID, localHub *p2p.Hub, processingNode *p2p.Node) {
+	log.Println("[gossip] pumpQueueUpdates started for peer", myID)
+	for {
+		msg, err := sub.Next(ctx)
+		if err != nil {
+			log.Printf("[gossip] pumpQueueUpdates: subscription error: %v", err)
+			if ctx.Err() != nil {
+				log.Println("[gossip] pumpQueueUpdates: context cancelled, exiting.")
+				return
+			}
+			return // Exit on other errors too for simplicity
+		}
+
+		if msg.ReceivedFrom == myID {
+			continue // Skip messages broadcast by self
+		}
+
+		var serverMsg clientpb.ServerMsg
+		if err := proto.Unmarshal(msg.Data, &serverMsg); err != nil {
+			log.Printf("[gossip] pumpQueueUpdates: failed to unmarshal ServerMsg from %s: %v", msg.ReceivedFrom, err)
+			continue
+		}
+
+		queueUpdateMsg, ok := serverMsg.GetPayload().(*clientpb.ServerMsg_QueueUpdate)
+		if !ok {
+			// log.Printf("[gossip] pumpQueueUpdates: received ServerMsg from %s is not QueueUpdate. Type: %T", msg.ReceivedFrom, serverMsg.GetPayload())
+			continue // Not a QueueUpdate message
+		}
+
+		log.Printf("[gossip] pumpQueueUpdates: received QueueUpdate from %s with %d items", msg.ReceivedFrom, len(queueUpdateMsg.QueueUpdate.GetItems()))
+		// Apply the update to the local queue state. This will also trigger local GUI update and runner check.
+		qc.ApplyUpdate(queueUpdateMsg.QueueUpdate, localHub, processingNode)
+	}
+}
+
 func main() {
 	// flags
 	var grpcPort int
