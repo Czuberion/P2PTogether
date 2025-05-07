@@ -1,12 +1,16 @@
 package p2p
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"peer_service/internal/roles"
 	clientpb "peer_service/proto"
 	p2ppb "peer_service/proto/p2p"
 
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"google.golang.org/protobuf/proto"
 )
 
 type QueueController struct {
@@ -31,7 +35,10 @@ func (qc *QueueController) snapshot() *clientpb.ServerMsg {
 	}
 }
 
-func (qc *QueueController) Handle(cmd *p2ppb.QueueCmd, sender peer.ID, perms roles.Permission, hub *Hub) error {
+// Handle processes a queue command, mutates the queue, and notifies local/remote clients.
+// It is called when a local gRPC client sends a QueueCmd.
+// The `ctrlTopic` is for publishing the update via GossipSub.
+func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, sender peer.ID, perms roles.Permission, hub *Hub, node *Node, ctrlTopic *pubsub.Topic) error {
 	if !roles.HasPermission(roles.PermQueue, perms) {
 		return fmt.Errorf("permission denied: missing Queue perm")
 	}
@@ -52,7 +59,28 @@ func (qc *QueueController) Handle(cmd *p2ppb.QueueCmd, sender peer.ID, perms rol
 		qc.q.PopHead()
 	}
 
-	// after any successful mutation
-	hub.Broadcast(qc.snapshot())
+	// After any successful mutation:
+	// 1. Notify local GUI client(s) via Hub
+	snapshotMsg := qc.snapshot()
+	if hub != nil {
+		hub.Broadcast(snapshotMsg)
+	}
+
+	// 2. Publish the QueueUpdate over GossipSub
+	if ctrlTopic != nil {
+		if marshalledServerMsg, err := proto.Marshal(snapshotMsg); err != nil {
+			log.Printf("[gossip] Handle: marshal ServerMsg{QueueUpdate} failed: %v", err)
+		} else if err := ctrlTopic.Publish(ctx, marshalledServerMsg); err != nil {
+			// Check context error for Publish
+			if ctx.Err() != nil {
+				log.Printf("[gossip] Handle: context error during publish ServerMsg{QueueUpdate}: %v", ctx.Err())
+			} else {
+				log.Printf("[gossip] Handle: publish ServerMsg{QueueUpdate} failed: %v", err)
+			}
+		}
+	}
+
+	// 3. Trigger queue-to-runner glue logic
+	// handleLocalQueueUpdateForRunner(node, qc, node.ID()) // Assumes handleLocalQueueUpdateForRunner is accessible
 	return nil
 }

@@ -73,16 +73,13 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		switch x := in.Payload.(type) {
 		case *clientpb.ClientMsg_QueueCmd:
 			perms := s.node.Permissions()
-			if err := s.queueCtrl.Handle(x.QueueCmd, pid, perms, s.hub); err != nil {
+
+			// Pass context from stream for cancellation propagation if Publish blocks.
+			// Pass s.node and s.ctrlTopic for Handle to use.
+			if err := s.queueCtrl.Handle(stream.Context(), x.QueueCmd, pid, perms, s.hub, s.node, s.ctrlTopic); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
-			}
-			// ---- broadcast the mutation to every peer via GossipSub ----
-			if data, err := proto.Marshal(x.QueueCmd); err != nil {
-				log.Printf("gossip marshal failed: %v", err)
-			} else if err := s.ctrlTopic.Publish(stream.Context(), data); err != nil {
-				log.Printf("gossip publish failed: %v", err)
 			}
 		default:
 			log.Printf("Received unhandled message type from %s", pid.String())
@@ -221,7 +218,7 @@ func main() {
 				log.Printf("[ctrl] bad proto from %s: %v", msg.ReceivedFrom, err)
 				continue
 			}
-			if err := queueCtrl.Handle(&qc, msg.ReceivedFrom, node.Permissions(), hub); err != nil {
+			if err := queueCtrl.Handle(ctx, &qc, msg.ReceivedFrom, node.Permissions(), hub, node, ctrlTopic); err != nil {
 				log.Printf("[ctrl] apply failed: %v", err)
 			}
 		}
