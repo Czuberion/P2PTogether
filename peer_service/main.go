@@ -22,11 +22,13 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
 	clientpb "peer_service/proto" // local import for client proto
+	p2ppb "peer_service/proto/p2p"
 )
 
 // server implements the gRPC service defined in proto.
@@ -38,10 +40,13 @@ type server struct {
 	hub *p2p.Hub
 
 	// owns the in-memory Queue and applies QueueCmds
-	ctrl *p2p.QueueController
+	queueCtrl *p2p.QueueController
 
 	// Peer runtime state
 	node *p2p.Node
+
+	// GossipSub control topic
+	ctrlTopic *pubsub.Topic
 }
 
 func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientpb.ServiceInfo, error) {
@@ -68,10 +73,16 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		switch x := in.Payload.(type) {
 		case *clientpb.ClientMsg_QueueCmd:
 			perms := s.node.Permissions()
-			if err := s.ctrl.Handle(x.QueueCmd, pid, perms, s.hub); err != nil {
+			if err := s.queueCtrl.Handle(x.QueueCmd, pid, perms, s.hub); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
+			}
+			// ---- broadcast the mutation to every peer via GossipSub ----
+			if data, err := proto.Marshal(x.QueueCmd); err != nil {
+				log.Printf("gossip marshal failed: %v", err)
+			} else if err := s.ctrlTopic.Publish(stream.Context(), data); err != nil {
+				log.Printf("gossip publish failed: %v", err)
 			}
 		default:
 			log.Printf("Received unhandled message type from %s", pid.String())
@@ -165,7 +176,7 @@ func main() {
 	}
 	grpcServer := grpc.NewServer()
 	hub := p2p.NewHub()
-	ctrl := p2p.NewQueueController()
+	queueCtrl := p2p.NewQueueController()
 
 	// 3) libp2p + GossipSub
 
@@ -189,6 +200,33 @@ func main() {
 
 	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
 
+	// Subscribe to /control and replay QueueCmds that arrive from other peers
+	// into the local QueueController.
+	subCtrl, err := ctrlTopic.Subscribe()
+	if err != nil {
+		log.Fatalf("ctrl topic subscribe: %v", err)
+	}
+	go func() {
+		for {
+			msg, err := subCtrl.Next(ctx)
+			if err != nil {
+				log.Printf("[ctrl] subscription closed: %v", err)
+				return
+			}
+			if msg.ReceivedFrom == lhost.ID() {
+				continue // skip our own echo
+			}
+			var qc p2ppb.QueueCmd
+			if err := proto.Unmarshal(msg.Data, &qc); err != nil {
+				log.Printf("[ctrl] bad proto from %s: %v", msg.ReceivedFrom, err)
+				continue
+			}
+			if err := queueCtrl.Handle(&qc, msg.ReceivedFrom, node.Permissions(), hub); err != nil {
+				log.Printf("[ctrl] apply failed: %v", err)
+			}
+		}
+	}()
+
 	//  Peer‑connected / peer‑lost trace
 	sub, err := lhost.EventBus().Subscribe(
 		[]interface{}{new(event.EvtPeerConnectednessChanged)})
@@ -210,10 +248,11 @@ func main() {
 	}()
 
 	clientpb.RegisterP2PTClientServer(grpcServer, &server{
-		hlsPort: hlsPort,
-		hub:     hub,
-		ctrl:    ctrl,
-		node:    node,
+		hlsPort:   hlsPort,
+		hub:       hub,
+		queueCtrl: queueCtrl,
+		node:      node,
+		ctrlTopic: ctrlTopic,
 	})
 
 	// fan‑out StreamStatus to every connected client
