@@ -11,8 +11,16 @@ import (
 // Handler returns two ready‑to‑use mux handlers:
 //   - /stream.m3u8  – rolling playlist
 //   - /seg_123.ts   – raw MPEG‑TS segment
-func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFunc) {
+func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFunc, triggerDiscontinuity func()) {
+	// pendingDiscont is set true by triggerDiscontinuity and reset after emitting
+	var pendingDiscont bool
 
+	// triggerDiscontinuity tells the playlist to emit an EXT-X-DISCONTINUITY tag
+	triggerDiscontinuity = func() {
+		pendingDiscont = true
+	}
+
+	// build the playlist handler
 	playlist = func(w http.ResponseWriter, r *http.Request) {
 		base, segs := rb.Snapshot()
 		// Always return **200 OK** so mpv can keep polling while the buffer
@@ -25,6 +33,12 @@ func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFun
 		buf.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
 		buf.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(SegmentDuration.Seconds())))
 		buf.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", base))
+
+		// insert discontinuity marker if we just hand-off to a new streamer
+		if pendingDiscont {
+			buf.WriteString("#EXT-X-DISCONTINUITY\n")
+			pendingDiscont = false
+		}
 
 		// If we already have segments, list them; otherwise return just the header.
 		for _, s := range segs {

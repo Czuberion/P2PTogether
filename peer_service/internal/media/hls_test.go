@@ -11,7 +11,7 @@ import (
 
 func TestEmptyPlaylistReturns200(t *testing.T) {
 	rb := media.NewRingBuffer(6) // 3 slots, initially empty
-	plH, _ := media.Handler(rb)
+	plH, _, _ := media.Handler(rb)
 
 	req := httptest.NewRequest(http.MethodGet, "/stream.m3u8", nil)
 	w := httptest.NewRecorder()

@@ -133,7 +133,7 @@ func main() {
 	// --- mini‑HLS in‑RAM buffer ---
 	rb := media.NewRingBuffer(120) // 120 s window
 	statusCh := media.StartStatusTicker(rb, 5*time.Second)
-	plH, segH := media.Handler(rb)
+	plH, segH, triggerDiscontinuity := media.Handler(rb)
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/stream.m3u8", plH)
@@ -249,6 +249,8 @@ func main() {
 	log.Println("Attempting gRPC server Stop()...")
 	grpcServer.Stop()                            // Force immediate stop
 	log.Println("gRPC server Stop() completed.") // Log completion
+
+	_ = triggerDiscontinuity // (future use when swapping streamers)
 
 	// Shutdown HTTP server
 	log.Println("Attempting HTTP server Shutdown()...")
