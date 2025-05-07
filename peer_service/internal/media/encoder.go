@@ -52,8 +52,10 @@ func DefaultConfig(input string) Config {
 	}
 }
 
-// Build assembles an ffmpeg-go stream according to the given config.
-func Build(cfg Config) *ffmpeg.Stream {
+// BuildHLSStreamForHTTPOutput assembles an ffmpeg-go stream configured to output HLS segments
+// via HTTP PUT to the specified outputURLPattern, starting with seqBase.
+// It uses the provided Config for encoding parameters.
+func BuildHLSStreamForHTTPOutput(cfg Config, outputURLPattern string, seqBase uint32) *ffmpeg.Stream {
 	// Align I-frames by *time* rather than frame-count so any FPS (fixed or
 	// VFR) can be handled.
 	forceExpr := fmt.Sprintf("expr:gte(t,n_forced*%d)", cfg.SegmentSeconds)
@@ -70,26 +72,32 @@ func Build(cfg Config) *ffmpeg.Stream {
 		inArgs["re"] = "" // -re has no value; presence of the key is enough
 	}
 
-	return ffmpeg.Input(cfg.Input, inArgs).
-		Output("pipe:1",
-			// container
-			ffmpeg.KwArgs{"f": "mpegts"},
+	inputStream := ffmpeg.Input(cfg.Input, inArgs)
 
-			// video
-			ffmpeg.KwArgs{
-				"c:v":              "libx264",
-				"preset":           cfg.VideoPreset,
-				"tune":             cfg.Tune,
-				"force_key_frames": forceExpr, // hard boundary every SegmentSeconds
-				"g":                gop,       // safety net: never exceed GOP
-				"keyint_min":       gop,       // …and forbid early scene-cut I-frames
-				"sc_threshold":     0,         // disable scene-cut detection entirely
-			},
+	// These are the output arguments specific to HLS PUT
+	outputArgs := ffmpeg.KwArgs{
+		// HLS Muxer options
+		"f":             "hls",
+		"hls_time":      fmt.Sprintf("%d", cfg.SegmentSeconds),
+		"hls_list_size": "0",                        // Keep all segments for EVENT playlist type
+		"hls_flags":     "independent_segments",     // Essential for clean segment boundaries
+		"start_number":  fmt.Sprintf("%d", seqBase), // Starting HLS media sequence number
+		"method":        "PUT",                      // HTTP PUT for segments
+		// The actual URL pattern is the first argument to Output(), not a KwArg here.
 
-			// audio
-			ffmpeg.KwArgs{
-				"c:a": "aac",
-				"b:a": cfg.AudioBitrate,
-			},
-		)
+		// Video encoding options
+		"c:v":              "libx264",
+		"preset":           cfg.VideoPreset,
+		"tune":             cfg.Tune,
+		"force_key_frames": forceExpr,
+		"g":                fmt.Sprintf("%d", gop),
+		"keyint_min":       fmt.Sprintf("%d", gop),
+		"sc_threshold":     "0",
+
+		// Audio encoding options
+		"c:a": "aac",
+		"b:a": cfg.AudioBitrate,
+	}
+
+	return inputStream.Output(outputURLPattern, outputArgs)
 }
