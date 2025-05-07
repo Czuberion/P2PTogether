@@ -28,7 +28,6 @@ import (
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
 	clientpb "peer_service/proto" // local import for client proto
-	p2ppb "peer_service/proto/p2p"
 )
 
 // server implements the gRPC service defined in proto.
@@ -233,32 +232,13 @@ func main() {
 
 	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
 
-	// Subscribe to /control and replay QueueCmds that arrive from other peers
-	// into the local QueueController.
+	// Subscribe to the control topic to receive QueueUpdate messages from other peers.
+	// The pumpQueueUpdates goroutine will process these messages.
 	subCtrl, err := ctrlTopic.Subscribe()
 	if err != nil {
 		log.Fatalf("ctrl topic subscribe: %v", err)
 	}
-	go func() {
-		for {
-			msg, err := subCtrl.Next(ctx)
-			if err != nil {
-				log.Printf("[ctrl] subscription closed: %v", err)
-				return
-			}
-			if msg.ReceivedFrom == lhost.ID() {
-				continue // skip our own echo
-			}
-			var qc p2ppb.QueueCmd
-			if err := proto.Unmarshal(msg.Data, &qc); err != nil {
-				log.Printf("[ctrl] bad proto from %s: %v", msg.ReceivedFrom, err)
-				continue
-			}
-			if err := queueCtrl.Handle(ctx, &qc, msg.ReceivedFrom, node.Permissions(), hub, node, ctrlTopic); err != nil {
-				log.Printf("[ctrl] apply failed: %v", err)
-			}
-		}
-	}()
+	go pumpQueueUpdates(ctx, subCtrl, queueCtrl, lhost.ID(), hub, node)
 
 	//  Peer‑connected / peer‑lost trace
 	sub, err := lhost.EventBus().Subscribe(
