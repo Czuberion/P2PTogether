@@ -128,7 +128,7 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     mainSplitter->addWidget(leftPanel);
 
     // Right panel: chat, queue, etc.
-    QWidget* rightPanel = createRightPanel(peer, &window);
+    QWidget* rightPanel = createRightPanel(peer, &window, worker);
     mainSplitter->addWidget(rightPanel);
     rightPanel->setMinimumWidth(300);
 

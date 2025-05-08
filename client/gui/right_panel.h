@@ -12,6 +12,7 @@
 #pragma once
 
 #include "p2p/peer.h"
+#include "transport/control_stream_worker.h"
 #include <QMainWindow>
 #include <QWidget>
 
@@ -35,6 +36,7 @@ extern std::function<void()> QueueButtonsRefreshCallback;
  * \param window Pointer to the main QMainWindow.
  * \return QWidget* The constructed right panel widget.
  */
-QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window);
+QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
+                          P2P::ControlStreamWorker* worker);
 
 } // namespace gui

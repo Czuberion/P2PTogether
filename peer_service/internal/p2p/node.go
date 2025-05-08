@@ -65,6 +65,15 @@ func NewNode(h host.Host, hlsPort uint32) *Node {
 	}
 }
 
+// NewNodeWithRoles creates a new Node with the specified initial roles for debugging
+func NewNodeWithRoles(h host.Host, hlsPort uint32, initialRoles []*roles.Role) *Node {
+	return &Node{
+		Host:    h,
+		hlsPort: hlsPort,
+		roles:   append([]*roles.Role(nil), initialRoles...), // Store a copy
+	}
+}
+
 // -------------- role / permission helpers --------------
 
 // Roles returns a copy of the current role set.
@@ -190,6 +199,12 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueContr
 func (n *Node) ReactToQueueUpdate(qc *QueueController) {
 	log.Printf("Node.ReactToQueueUpdate: Checking runner state for peer %s", n.ID())
 	head, ok := qc.Q().Head()
+
+	log.Printf("ReactToQueueUpdate: Current Node ID: %s", n.ID())
+	if ok { // if head item exists
+		log.Printf("ReactToQueueUpdate: Queue head StoredBy: %s, FilePath: %s", head.StoredBy, head.FilePath)
+	}
+	log.Printf("ReactToQueueUpdate: Node has PermStream: %v", roles.HasPermissionFromRoles(roles.PermStream, n.roles...))
 	if !ok {
 		log.Println("Node.ReactToQueueUpdate: Queue is empty. Ensuring runner is stopped.")
 		n.EnsureRunnerState("", 0, qc) // Pass qc for re-verification inside EnsureRunnerState

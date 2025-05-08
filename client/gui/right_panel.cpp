@@ -21,7 +21,8 @@ namespace gui {
 
 std::function<void()> QueueButtonsRefreshCallback;
 
-QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
+QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
+                          P2P::ControlStreamWorker* worker) {
     QWidget* rightPanel = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(rightPanel);
     rightPanel->setLayout(layout);
@@ -98,8 +99,34 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
     // Queue list
     QListWidget* queueList = new QListWidget();
     queueList->setMinimumHeight(100);
-    queueList->addItem("Sample_video_1.mp4");
-    queueList->addItem("My_favorite_movie.mkv");
+    // queueList->addItem("Sample_video_1.mp4");
+    // queueList->addItem("My_favorite_movie.mkv");
+
+    // Connect to the worker's serverMsg signal to handle QueueUpdates
+    if (worker) {
+        QObject::connect(
+            worker, &P2P::ControlStreamWorker::serverMsg, queueList,
+            [queueList](const client::ServerMsg& msg) {
+                if (msg.payload_case() == client::ServerMsg::kQueueUpdate) {
+                    qDebug() << "GUI: Received QueueUpdate";
+                    const client::p2p::QueueUpdate& update = msg.queue_update();
+                    queueList->clear(); // Clear existing items
+                    for (const auto& item : update.items()) {
+                        // Displaying only file_path for simplicity.
+                        // You might want to format this string to show
+                        // StoredBy, AddedBy etc. e.g., QString display_text =
+                        // QString::fromStdString(item.file_path()) +
+                        //                              " (by " +
+                        //                              QString::fromStdString(item.added_by())
+                        //                              + ")";
+                        queueList->addItem(
+                            QString::fromStdString(item.file_path()));
+                    }
+                }
+            },
+            Qt::QueuedConnection); // QueuedConnection is good for cross-thread
+                                   // signals
+    }
 
     // Queue buttons (visible only when we have Queue permission)
     QWidget* queueButtonsWidget     = new QWidget();
@@ -155,35 +182,61 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window) {
         });
 
     QObject::connect(
-        addBtn, &QPushButton::clicked, [peer, window, queueList]() {
+        addBtn, &QPushButton::clicked, [peer, window, queueList, worker]() {
             QString filePath = QFileDialog::getOpenFileName(
                 window, "Open Video File", "",
                 "Video Files (*.mp4 *.mkv *.avi *.mov);;All Files (*)");
             if (filePath.isEmpty())
                 return;
-            QFileInfo fi(filePath);
-            QString filename = fi.fileName();
-            queueList->addItem(filename);
-            // If streamer, simulate starting streaming
-            if (peer->hasRole(P2P::Role::Streamer)) {
-                qDebug() << "Starting to stream file:" << filePath;
-                if (!peer->startStreaming(filePath.toStdString()))
-                    QMessageBox::critical(window, "Error",
-                                          "Failed to start streaming");
-            } else {
-                QMessageBox::information(window, "Not streamer",
-                                         "You do not have 'streamer' role, so "
-                                         "you cannot broadcast this file.");
+            if (worker) {
+                client::ClientMsg clientMsg;
+                client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
+                cmd->set_type(client::p2p::QueueCmd_Type_APPEND);
+                cmd->set_file_path(filePath.toStdString());
+                // HLC timestamp can be set here if needed, e.g.,
+                // QDateTime::currentMSecsSinceEpoch()
+                // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+
+                qDebug() << "GUI: Sending APPEND QueueCmd for" << filePath;
+                // Use QMetaObject::invokeMethod to ensure send is called on the
+                // worker's thread if createRightPanel is called from a
+                // different thread than the worker's. However, worker->send is
+                // thread-safe due to its internal mutex.
+                worker->send(clientMsg);
             }
+            // The QListWidget will be updated when ServerMsg_QueueUpdate is
+            // received. So, we don't manually addItem here anymore.
         });
-    QObject::connect(removeBtn, &QPushButton::clicked, [queueList]() {
+    QObject::connect(removeBtn, &QPushButton::clicked, [queueList, worker]() {
         int row = queueList->currentRow();
         if (row >= 0) {
-            delete queueList->takeItem(row);
+            if (worker) {
+                client::ClientMsg clientMsg;
+                client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
+                cmd->set_type(client::p2p::QueueCmd_Type_REMOVE);
+                cmd->set_index(static_cast<int32_t>(row));
+                // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+
+                qDebug() << "GUI: Sending REMOVE QueueCmd for index" << row;
+                worker->send(clientMsg);
+            }
+            // The QListWidget will be updated when ServerMsg_QueueUpdate is
+            // received.
         }
     });
-    QObject::connect(clearBtn, &QPushButton::clicked,
-                     [queueList]() { queueList->clear(); });
+    QObject::connect(clearBtn, &QPushButton::clicked, [queueList, worker]() {
+        if (worker) {
+            client::ClientMsg clientMsg;
+            client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
+            cmd->set_type(client::p2p::QueueCmd_Type_CLEAR);
+            // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+
+            qDebug() << "GUI: Sending CLEAR QueueCmd";
+            worker->send(clientMsg);
+        }
+        // The QListWidget will be updated when ServerMsg_QueueUpdate is
+        // received.
+    });
 
     QObject::connect(queueList, &QListWidget::currentRowChanged,
                      [removeBtn](int row) { removeBtn->setEnabled(row >= 0); });

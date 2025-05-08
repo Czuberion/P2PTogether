@@ -27,6 +27,7 @@ import (
 
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
+	"peer_service/internal/roles"
 	clientpb "peer_service/proto" // local import for client proto
 )
 
@@ -53,19 +54,29 @@ func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientp
 }
 
 func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) error {
-	pid := peer.ID("stub") // later: real peer ID from auth layer
-	s.hub.Add(pid.String(), stream)
-	log.Printf("Client %s connected.", pid.String()) // Log connection
+	// pid := peer.ID("stub") // later: real peer ID from auth layer
+	// s.hub.Add(pid.String(), stream)
+	// log.Printf("Client %s connected.", pid.String()) // Log connection
+
+	// For now, assume any gRPC connection is the local GUI acting on behalf of the node.
+	// Use the node's actual ID for tracking and identification within the hub.
+	// A proper system would involve authentication to get the remote client's ID.
+	nodeIDStr := s.node.ID().String()
+	s.hub.Add(nodeIDStr, stream)
+	log.Printf("Client connection associated with node %s added to hub.", nodeIDStr)
 	defer func() {
-		s.hub.Remove(pid.String())
-		log.Printf("Client %s removed from hub.", pid.String()) // Log removal
+		// s.hub.Remove(pid.String())
+		// log.Printf("Client %s removed from hub.", pid.String()) // Log removal
+		s.hub.Remove(nodeIDStr)
+		log.Printf("Client connection associated with node %s removed from hub.", nodeIDStr)
 	}()
 
 	for {
 		in, err := stream.Recv()
 		if err != nil {
 			// Log client disconnection reason
-			log.Printf("Client %s disconnected: %v", pid.String(), err)
+			// log.Printf("Client %s disconnected: %v", pid.String(), err)
+			log.Printf("Client associated with node %s disconnected: %v", nodeIDStr, err)
 			return err // Return error to signal stream closure
 		}
 
@@ -75,13 +86,17 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 			// Pass context from stream for cancellation propagation if Publish blocks.
 			// Pass s.node and s.ctrlTopic for Handle to use.
-			if err := s.queueCtrl.Handle(stream.Context(), x.QueueCmd, pid, perms, s.hub, s.node, s.ctrlTopic); err != nil {
-				log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
+			// if err := s.queueCtrl.Handle(stream.Context(), x.QueueCmd, pid, perms, s.hub, s.node, s.ctrlTopic); err != nil {
+			// 	log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
+
+			// Pass the node's ID as the 'sender' for commands originating from the local gRPC client.
+			if err := s.queueCtrl.Handle(stream.Context(), x.QueueCmd, s.node.ID(), perms, s.hub, s.node, s.ctrlTopic); err != nil {
+				log.Printf("Error handling QueueCmd from local client (node %s): %v", nodeIDStr, err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
 			}
 		default:
-			log.Printf("Received unhandled message type from %s", pid.String())
+			log.Printf("Received unhandled message type from %s", nodeIDStr)
 		}
 	}
 }
@@ -162,8 +177,22 @@ func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.Que
 func main() {
 	// flags
 	var grpcPort int
+	var initialRolesStr string
 	flag.IntVar(&grpcPort, "grpc-port", 0, "gRPC listen port")
+	flag.StringVar(&initialRolesStr, "roles", "viewer", "Comma-separated initial roles for this peer (e.g., viewer,streamer,admin)")
 	flag.Parse()
+
+	// Parse initial roles
+	parsedRoles, err := roles.ParseRoles(initialRolesStr)
+	if err != nil {
+		log.Fatalf("Failed to parse initial roles from flag '%s': %v", initialRolesStr, err)
+	}
+	if len(parsedRoles) == 0 { // Ensure at least one role, default to viewer if parsing somehow results in empty
+		log.Printf("Warning: No valid roles parsed from '%s', defaulting to 'viewer'", initialRolesStr)
+		viewerRole, _ := roles.ParseRoles("viewer") // This should always succeed
+		parsedRoles = viewerRole
+	}
+	log.Printf("Initializing peer with roles: %s", initialRolesStr)
 
 	// 1) Start HTTP mini-HLS on a random port
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -215,7 +244,7 @@ func main() {
 	ctx := context.Background()
 
 	lhost := buildHost(ctx)
-	node := p2p.NewNode(lhost, hlsPort)
+	node := p2p.NewNodeWithRoles(lhost, hlsPort, parsedRoles)
 
 	ps, err := pubsub.NewGossipSub(ctx, lhost)
 	if err != nil {

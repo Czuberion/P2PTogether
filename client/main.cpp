@@ -75,7 +75,8 @@ int main(int argc, char* argv[]) {
                      });
 
     // Pass the chosen port to the daemon
-    QStringList args = {QString("--grpc-port=%1").arg(grpcPort)};
+    QStringList args = {QString("--grpc-port=%1").arg(grpcPort),
+                        QString("--roles=Streamer,Viewer")};
 
     qInfo() << "Starting peer_service at:" << peerServicePath
             << "with args:" << args;
