@@ -99,14 +99,49 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     // Queue list
     QListWidget* queueList = new QListWidget();
     queueList->setMinimumHeight(100);
-    // queueList->addItem("Sample_video_1.mp4");
-    // queueList->addItem("My_favorite_movie.mkv");
+
+    // Queue buttons (visible only when we have Queue permission)
+    QWidget* queueButtonsWidget     = new QWidget();
+    QHBoxLayout* queueButtonsLayout = new QHBoxLayout(queueButtonsWidget);
+    queueButtonsWidget->setLayout(queueButtonsLayout);
+
+    // Queue buttons and list visibility
+    static bool queueVisible           = true;
+    auto refreshQueueButtonsVisibility = [peer, queueButtonsWidget]() {
+        queueButtonsWidget->setVisible(P2P::hasQueuePermission(peer->roles) &&
+                                       queueVisible);
+    };
+    QueueButtonsRefreshCallback = refreshQueueButtonsVisibility;
+
+    QPushButton* addBtn = new QPushButton("+");
+    addBtn->setFixedSize(40, 40);
+    addBtn->setStyleSheet("font-size: 20px; text-align: center;");
+    addBtn->setToolTip("Add a video to the queue");
+
+    QPushButton* removeBtn = new QPushButton("-");
+    removeBtn->setFixedSize(40, 40);
+    removeBtn->setStyleSheet("font-size: 20px; text-align: center;");
+    removeBtn->setToolTip("Remove selected video from the queue");
+    removeBtn->setEnabled(queueList->count() > 0);
+
+    QPushButton* clearBtn = new QPushButton("✕");
+    clearBtn->setFixedSize(40, 40);
+    clearBtn->setStyleSheet("font-size: 20px; text-align: center;");
+    clearBtn->setToolTip("Clear the queue");
+    clearBtn->setEnabled(queueList->count() > 0);
+
+    queueButtonsLayout->addStretch();
+    queueButtonsLayout->addWidget(addBtn);
+    queueButtonsLayout->addWidget(removeBtn);
+    queueButtonsLayout->addWidget(clearBtn);
+    queueButtonsLayout->addStretch();
+    refreshQueueButtonsVisibility();
 
     // Connect to the worker's serverMsg signal to handle QueueUpdates
     if (worker) {
         QObject::connect(
             worker, &P2P::ControlStreamWorker::serverMsg, queueList,
-            [queueList](const client::ServerMsg& msg) {
+            [queueList, clearBtn](const client::ServerMsg& msg) {
                 if (msg.payload_case() == client::ServerMsg::kQueueUpdate) {
                     qDebug() << "GUI: Received QueueUpdate";
                     const client::p2p::QueueUpdate& update = msg.queue_update();
@@ -122,64 +157,40 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
                         queueList->addItem(
                             QString::fromStdString(item.file_path()));
                     }
+                    // Update clear button state after list is potentially
+                    // modified
+                    if (clearBtn) {
+                        clearBtn->setEnabled(queueList->count() > 0);
+                    }
                 }
             },
             Qt::QueuedConnection); // QueuedConnection is good for cross-thread
                                    // signals
     }
 
-    // Queue buttons (visible only when we have Queue permission)
-    QWidget* queueButtonsWidget     = new QWidget();
-    QHBoxLayout* queueButtonsLayout = new QHBoxLayout(queueButtonsWidget);
-
-    auto refreshQueueButtonsVisibility = [peer, queueButtonsWidget]() {
-        queueButtonsWidget->setVisible(P2P::hasQueuePermission(peer->roles));
-    };
-
-    QueueButtonsRefreshCallback = refreshQueueButtonsVisibility;
-
-    queueButtonsWidget->setLayout(queueButtonsLayout);
-    QPushButton* addBtn = new QPushButton("+");
-    addBtn->setFixedSize(40, 40);
-    addBtn->setStyleSheet("font-size: 20px; text-align: center;");
-    addBtn->setToolTip("Add a video to the queue");
-    QPushButton* removeBtn = new QPushButton("-");
-    removeBtn->setFixedSize(40, 40);
-    removeBtn->setStyleSheet("font-size: 20px; text-align: center;");
-    removeBtn->setToolTip("Remove selected video from the queue");
-    removeBtn->setEnabled(false);
-    QPushButton* clearBtn = new QPushButton("✕");
-    clearBtn->setFixedSize(40, 40);
-    clearBtn->setStyleSheet("font-size: 20px; text-align: center;");
-    clearBtn->setToolTip("Clear the queue");
-    queueButtonsLayout->addStretch();
-    queueButtonsLayout->addWidget(addBtn);
-    queueButtonsLayout->addWidget(removeBtn);
-    queueButtonsLayout->addWidget(clearBtn);
-    queueButtonsLayout->addStretch();
-    refreshQueueButtonsVisibility();
-
-    // Use a static variable for queue visibility so it persists beyond this
-    // function
-    static bool queueVisible = true;
-    QObject::connect(
-        toggleQueueBtn, &QPushButton::clicked,
-        [toggleQueueBtn, queueList, queueButtonsWidget, queueWidget]() mutable {
-            queueVisible = !queueVisible;
-            if (queueVisible) {
-                queueList->show();
-                queueButtonsWidget->show();
-                toggleQueueBtn->setText("▼");
-                queueWidget->setMaximumHeight(QWIDGETSIZE_MAX);
-            } else {
-                queueList->hide();
-                queueButtonsWidget->hide();
-                toggleQueueBtn->setText("▲");
-                queueWidget->setMaximumHeight(queueList->sizeHint().height() +
-                                              10);
-            }
-            QueueButtonsRefreshCallback();
-        });
+    QObject::connect(toggleQueueBtn, &QPushButton::clicked,
+                     [toggleQueueBtn, queueList, queueButtonsWidget,
+                      queueWidget, queueHeaderWidget]() mutable {
+                         queueVisible = !queueVisible;
+                         if (queueVisible) {
+                             queueList->show();
+                             toggleQueueBtn->setText("▼");
+                             queueWidget->setMaximumHeight(QWIDGETSIZE_MAX);
+                         } else {
+                             queueList->hide();
+                             toggleQueueBtn->setText("▲");
+                             // Calculate minimum height needed for the header +
+                             // layout margins
+                             int headerHeight =
+                                 queueHeaderWidget->sizeHint().height();
+                             int topMargin, bottomMargin;
+                             queueWidget->layout()->getContentsMargins(
+                                 nullptr, &topMargin, nullptr, &bottomMargin);
+                             queueWidget->setMaximumHeight(
+                                 headerHeight + topMargin + bottomMargin);
+                         }
+                         QueueButtonsRefreshCallback();
+                     });
 
     QObject::connect(
         addBtn, &QPushButton::clicked, [peer, window, queueList, worker]() {
@@ -207,6 +218,7 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
             // The QListWidget will be updated when ServerMsg_QueueUpdate is
             // received. So, we don't manually addItem here anymore.
         });
+
     QObject::connect(removeBtn, &QPushButton::clicked, [queueList, worker]() {
         int row = queueList->currentRow();
         if (row >= 0) {
@@ -224,6 +236,7 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
             // received.
         }
     });
+
     QObject::connect(clearBtn, &QPushButton::clicked, [queueList, worker]() {
         if (worker) {
             client::ClientMsg clientMsg;
