@@ -3,9 +3,58 @@ package client.p2p;
 
 option go_package = "peer_service/proto/p2p";
 
-// Broadcast whenever a peer’s effective permissions change.
-message RoleUpdate {
-  string peer_id = 1;     // libp2p peer.ID (string form)
-  uint32 permissions = 2; // bit‑mask (see roles.Permission)
-  int64 hlc_ts = 3;       // Hybrid Logical Clock ms
+message RoleDefinition {
+  // Canonical role name
+  string name = 1;
+  // Bitmask for this role
+  uint32 permissions = 2;
+  // Optionally add metadata like description, icon, etc.
+}
+
+message RoleDefinitionsUpdate {
+  // Full set of currently defined roles
+  repeated RoleDefinition definitions = 1;
+  // Timestamp for the update
+  int64 hlc_ts = 2;
+}
+
+// State broadcast from Service -> Client about a peer's roles
+message PeerRoleAssignment {
+  // Target Peer ID
+  string peer_id = 1;
+  // List of role names assigned to this peer
+  repeated string assigned_role_names = 2;
+  // Timestamp for this specific assignment update
+  int64 hlc_ts = 3;
+}
+
+// State snapshot broadcast from Service -> Client about *all* peers' roles
+// Typically sent once when a client connects.
+message AllPeerRoleAssignments {
+  // Contains assignments for all peers.
+  repeated PeerRoleAssignment assignments = 1;
+  // Timestamp for when this snapshot was generated
+  int64 hlc_ts = 2;
+}
+
+// Command from Client -> Service to change a peer's roles
+message SetPeerRolesCmd {
+  // Target Peer ID
+  string target_peer_id = 1;
+  // The complete new list of roles for the target
+  repeated string assigned_role_names = 2;
+  // Timestamp for the command
+  int64 hlc_ts = 3;
+}
+
+// Command from Client -> Service to add/update a role
+message UpdateRoleCmd {
+  RoleDefinition definition = 1;
+  int64 hlc_ts = 2;
+}
+
+// Command from Client -> Service to remove a role definition
+message RemoveRoleCmd {
+  string role_name = 1;
+  int64 hlc_ts = 2;
 }

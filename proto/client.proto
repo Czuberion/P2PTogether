@@ -26,6 +26,9 @@ message ClientMsg {
     client.p2p.QueueCmd queue_cmd = 1;
     client.p2p.PlaybackCmd playback_cmd = 2;
     client.p2p.ChatCmd chat_cmd = 3;
+    client.p2p.SetPeerRolesCmd set_peer_roles_cmd = 4;
+    client.p2p.UpdateRoleCmd update_role_cmd = 5;
+    client.p2p.RemoveRoleCmd remove_role_cmd = 6;
   }
 }
 
@@ -34,9 +37,11 @@ message ServerMsg {
   oneof payload {
     client.p2p.QueueUpdate queue_update = 1;
     client.p2p.StreamStatus stream_status = 2;
-    client.p2p.RoleUpdate role_update = 3;
-    client.p2p.ChatMsg chat_msg = 4;
-    client.p2p.AnalyticsUpdate analytics_update = 5;
+    client.p2p.ChatMsg chat_msg = 3;
+    client.p2p.AnalyticsUpdate analytics_update = 4;
+    client.p2p.RoleDefinitionsUpdate role_definitions_update = 5;
+    client.p2p.PeerRoleAssignment peer_role_assignment = 6;
+    client.p2p.AllPeerRoleAssignments all_peer_role_assignments = 7;
   }
 }
 
