@@ -18,7 +18,10 @@ message QueueCmd {
 }
 
 /* —— Events —— */
-message QueueUpdate { repeated QueueItem items = 1; }
+message QueueUpdate {
+  repeated QueueItem items = 1;
+  int64 hlc_ts = 2;
+}
 
 message QueueItem {
   string file_path = 1;

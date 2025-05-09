@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"peer_service/internal/common"
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
 	"peer_service/internal/roles"
@@ -65,16 +66,19 @@ func (s *server) sendInitialState(stream clientpb.P2PTClient_ControlStreamServer
 	for _, d := range defs {
 		pbDefs = append(pbDefs, &p2ppb.RoleDefinition{Name: d.Name, Permissions: uint32(d.Permissions)})
 	}
-	defUpdate := &p2ppb.RoleDefinitionsUpdate{Definitions: pbDefs /* Add HLC TS */}
+	defUpdate := &p2ppb.RoleDefinitionsUpdate{Definitions: pbDefs, HlcTs: common.GetCurrentHLC()}
 	_ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: defUpdate}}) // Error handling omitted for brevity
 
 	// 2. Send All Peer Assignments (TODO: Need RoleManager method to get all assignments)
 	// assignmentsSnapshot := s.roleManager.GetAllAssignments() // Assuming this method exists
-	// allAssignmentsMsg := &p2ppb.AllPeerRoleAssignments{...} // Populate this
+	// allAssignmentsMsg := &p2ppb.AllPeerRoleAssignments{Assignments: ..., HlcTs: common.GetCurrentHLC()}
 	// _ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: allAssignmentsMsg}})
 
 	// 3. Send Current Queue State
 	queueSnapshot := s.queueCtrl.Snapshot() // Assuming Snapshot() is public or accessible
+	if qu, ok := queueSnapshot.GetPayload().(*clientpb.ServerMsg_QueueUpdate); ok {
+		qu.QueueUpdate.HlcTs = common.GetCurrentHLC() // Add HLC to queue snapshot if it has a place for it
+	}
 	_ = stream.Send(queueSnapshot)
 
 	log.Printf("Sent initial state (roles, queue) to client for node %s", s.node.ID())
@@ -114,10 +118,23 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 			// Permission check now happens inside Handle using RoleManager
 			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, s.node.ID(), s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
-				log.Printf("Error handling QueueCmd from local client (node %s): %v", nodeIDStr, err)
+				log.Printf("Error handling QueueCmd (HLC: %d) from local client (node %s): %v", cmd.QueueCmd.HlcTs, nodeIDStr, err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
 			}
+
+		case *clientpb.ClientMsg_SetPeerRolesCmd:
+			log.Printf("Received SetPeerRolesCmd (HLC: %d) from %s for target %s", cmd.SetPeerRolesCmd.HlcTs, nodeIDStr, cmd.SetPeerRolesCmd.TargetPeerId)
+			s.handleSetPeerRolesCmd(stream.Context(), cmd.SetPeerRolesCmd, s.node.ID()) // Assuming s.node.ID() is the sender for now
+
+		case *clientpb.ClientMsg_UpdateRoleCmd:
+			log.Printf("Received UpdateRoleCmd (HLC: %d) from %s for role %s", cmd.UpdateRoleCmd.HlcTs, nodeIDStr, cmd.UpdateRoleCmd.Definition.Name)
+			s.handleUpdateRoleCmd(stream.Context(), cmd.UpdateRoleCmd, s.node.ID())
+
+		case *clientpb.ClientMsg_RemoveRoleCmd:
+			log.Printf("Received RemoveRoleCmd (HLC: %d) from %s for role %s", cmd.RemoveRoleCmd.HlcTs, nodeIDStr, cmd.RemoveRoleCmd.RoleName)
+			s.handleRemoveRoleCmd(stream.Context(), cmd.RemoveRoleCmd, s.node.ID())
+
 		default:
 			log.Printf("Received unhandled message type from %s", nodeIDStr)
 		}
@@ -129,7 +146,7 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 	// 1. Check if sender has permission to manage roles
 	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
 	if !senderPerms.Has(roles.PermManageUserRoles) {
-		log.Printf("Permission denied: Peer %s lacks PermManageUserRoles to set roles for %s", senderID, cmd.TargetPeerId)
+		log.Printf("Permission denied: Peer %s lacks PermManageUserRoles to set roles for %s (Cmd HLC: %d)", senderID, cmd.TargetPeerId, cmd.HlcTs)
 		// Optionally send an error back to the sender via gRPC stream?
 		return
 	}
@@ -137,13 +154,113 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 	// 2. Decode target peer ID and call RoleManager
 	targetPeerID, err := peer.Decode(cmd.TargetPeerId)
 	if err != nil {
-		log.Printf("Failed to decode target peer ID '%s': %v", cmd.TargetPeerId, err)
-		return // Handle error appropriately
+		log.Printf("Failed to decode target peer ID '%s' for SetPeerRolesCmd: %v", cmd.TargetPeerId, err)
+		return
 	}
 
-	err = s.roleManager.SetPeerRoles(targetPeerID, cmd.AssignedRoleNames)
-	// ... (Error handling for SetPeerRoles) ...
-	// SetPeerRoles should trigger broadcasts via Hub/Topic if successful
+	assignmentMsg, err := s.roleManager.SetPeerRoles(targetPeerID, cmd.AssignedRoleNames)
+	if err != nil {
+		log.Printf("Error setting peer roles for %s: %v", targetPeerID, err)
+		// Optionally send an error back to the client
+		return
+	}
+
+	if assignmentMsg != nil { // If there was a change
+		assignmentMsg.HlcTs = common.GetCurrentHLC() // Set HLC timestamp on the generated message
+		log.Printf("Broadcasting PeerRoleAssignment for %s", targetPeerID)
+		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
+		s.hub.Broadcast(serverPayload)
+		if marshalledMsg, merr := proto.Marshal(serverPayload); merr != nil {
+			log.Printf("Failed to marshal PeerRoleAssignment for broadcast: %v", merr)
+		} else {
+			if perr := s.ctrlTopic.Publish(ctx, marshalledMsg); perr != nil {
+				log.Printf("Failed to publish PeerRoleAssignment to ctrlTopic: %v", perr)
+			}
+		}
+	}
+}
+
+func (s *server) handleUpdateRoleCmd(ctx context.Context, cmd *p2ppb.UpdateRoleCmd, senderID peer.ID) {
+	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+	if !senderPerms.Has(roles.PermAddRemoveRoles) { // Example permission
+		log.Printf("Permission denied: Peer %s lacks PermAddRemoveRoles to update role definitions (Cmd HLC: %d)", senderID, cmd.HlcTs)
+		return
+	}
+
+	if cmd.Definition == nil {
+		log.Printf("Error handling UpdateRoleCmd: Definition is nil (Cmd HLC: %d)", cmd.HlcTs)
+		return
+	}
+
+	definitionsUpdateMsg, err := s.roleManager.UpdateDefinition(cmd.Definition.Name, roles.Permission(cmd.Definition.Permissions))
+	if err != nil {
+		log.Printf("Error updating role definition '%s': %v (Cmd HLC: %d)", cmd.Definition.Name, err, cmd.HlcTs)
+		return
+	}
+
+	if definitionsUpdateMsg != nil {
+		definitionsUpdateMsg.HlcTs = common.GetCurrentHLC()
+		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' updated", cmd.Definition.Name)
+		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: definitionsUpdateMsg}}
+		s.hub.Broadcast(serverPayload)
+		if marshalledMsg, merr := proto.Marshal(serverPayload); merr != nil {
+			log.Printf("Failed to marshal RoleDefinitionsUpdate for broadcast: %v", merr)
+		} else {
+			if perr := s.ctrlTopic.Publish(ctx, marshalledMsg); perr != nil {
+				log.Printf("Failed to publish RoleDefinitionsUpdate to ctrlTopic: %v", perr)
+			}
+		}
+	}
+}
+
+func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleCmd, senderID peer.ID) {
+	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+	if !senderPerms.Has(roles.PermAddRemoveRoles) {
+		log.Printf("Permission denied: Peer %s lacks PermAddRemoveRoles to remove role definitions (Cmd HLC: %d)", senderID, cmd.HlcTs)
+		return
+	}
+
+	definitionsUpdateMsg, affectedAssignments, err := s.roleManager.RemoveDefinition(cmd.RoleName)
+	if err != nil {
+		log.Printf("Error removing role definition '%s': %v (Cmd HLC: %d)", cmd.RoleName, err, cmd.HlcTs)
+		return
+	}
+
+	if definitionsUpdateMsg != nil { // Should always be non-nil on success from RemoveDefinition
+		definitionsUpdateMsg.HlcTs = common.GetCurrentHLC()
+		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' removed", cmd.RoleName)
+		serverPayloadDefs := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: definitionsUpdateMsg}}
+
+		// Broadcast to local clients
+		s.hub.Broadcast(serverPayloadDefs)
+
+		// Publish to other peers via GossipSub
+		if marshalledMsgDefs, mErr := proto.Marshal(serverPayloadDefs); mErr != nil {
+			log.Printf("Failed to marshal RoleDefinitionsUpdate (for remove) for GossipSub publish: %v", mErr)
+		} else {
+			if pubErr := s.ctrlTopic.Publish(ctx, marshalledMsgDefs); pubErr != nil {
+				log.Printf("Failed to publish RoleDefinitionsUpdate (for remove) to ctrlTopic: %v", pubErr)
+			}
+		}
+	}
+
+	for _, assignmentMsg := range affectedAssignments {
+		assignmentMsg.HlcTs = common.GetCurrentHLC()
+		log.Printf("Broadcasting PeerRoleAssignment update for peer %s after role '%s' removed", assignmentMsg.PeerId, cmd.RoleName)
+		serverPayloadAssign := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
+
+		// Broadcast to local clients
+		s.hub.Broadcast(serverPayloadAssign)
+
+		// Publish to other peers via GossipSub
+		if marshalledMsgAssign, mErr := proto.Marshal(serverPayloadAssign); mErr != nil {
+			log.Printf("Failed to marshal PeerRoleAssignment (for remove) for GossipSub publish: %v", mErr)
+		} else {
+			if pubErr := s.ctrlTopic.Publish(ctx, marshalledMsgAssign); pubErr != nil {
+				log.Printf("Failed to publish PeerRoleAssignment (for remove) to ctrlTopic: %v", pubErr)
+			}
+		}
+	}
 }
 
 // mdnsNotifee prints every peer it discovers on the LAN.

@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	p2ppb "peer_service/proto/p2p"
 )
 
 // defaultRoleDefinitions defines the built-in roles included when a RoleManager is created.
@@ -134,17 +136,18 @@ func (rm *RoleManager) GetPermissionsForPeer(peerID peer.ID) Permission {
 
 // SetPeerRoles assigns a specific list of roles to a target peer.
 // It validates that all provided role names exist in the current definitions.
-// Existing roles for the peer are overwritten.
-func (rm *RoleManager) SetPeerRoles(targetPeer peer.ID, roleNames []string) error {
+// Existing roles for the peer are overwritten. Returns a PeerRoleAssignment
+// message suitable for broadcasting if the assignment actually changed, otherwise nil.
+func (rm *RoleManager) SetPeerRoles(targetPeer peer.ID, roleNames []string) (*p2ppb.PeerRoleAssignment, error) {
 	normalizedNames := make([]string, 0, len(roleNames))
 
-	// 1. Validate and normalize role names against current definitions
+	// Validate and normalize role names against current definitions
 	rm.definitionsMu.RLock()
 	for _, name := range roleNames {
 		normName := strings.ToLower(strings.TrimSpace(name))
 		if _, exists := rm.definitions[normName]; !exists {
 			rm.definitionsMu.RUnlock()
-			return fmt.Errorf("role '%s' not defined", name)
+			return nil, fmt.Errorf("role '%s' not defined", name)
 		}
 		if normName != "" {
 			normalizedNames = append(normalizedNames, normName)
@@ -152,22 +155,43 @@ func (rm *RoleManager) SetPeerRoles(targetPeer peer.ID, roleNames []string) erro
 	}
 	rm.definitionsMu.RUnlock()
 
-	// 2. Update assignments map
+	// Check if the assignment actually changes to avoid unnecessary broadcasts
 	rm.assignmentsMu.Lock()
-	if len(normalizedNames) > 0 {
-		namesCopy := make([]string, len(normalizedNames))
-		copy(namesCopy, normalizedNames)
-		rm.assignments[targetPeer] = namesCopy
-	} else {
-		delete(rm.assignments, targetPeer)
+	currentRoles := rm.assignments[targetPeer] // This is a direct slice, be careful
+	changed := !slicesEqual(currentRoles, normalizedNames)
+
+	if changed {
+		if len(normalizedNames) > 0 {
+			namesCopy := make([]string, len(normalizedNames))
+			copy(namesCopy, normalizedNames)
+			rm.assignments[targetPeer] = namesCopy
+		} else {
+			delete(rm.assignments, targetPeer)
+		}
 	}
 	rm.assignmentsMu.Unlock()
 
-	// TODO: Trigger broadcast
-	// This function would need access to Hub and Topic, or return data to the caller
-	// Example: rm.broadcastAssignmentUpdate(targetPeer, normalizedNames)
+	if changed {
+		return &p2ppb.PeerRoleAssignment{ // HlcTs will be set by the caller
+			PeerId:            targetPeer.String(),
+			AssignedRoleNames: normalizedNames, // Send the new set
+		}, nil
+	}
 
-	return nil
+	return nil, nil // No change, nothing to broadcast
+}
+
+// Helper function to compare two string slices (order matters for this check)
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseRoleNames validates a comma-separated string of role names against
@@ -202,44 +226,62 @@ func (rm *RoleManager) ParseRoleNames(roleStr string) ([]Role, error) {
 // Broadcasting RoleDefinitionsUpdate is essential.
 
 // UpdateDefinition adds or updates a role definition.
-func (rm *RoleManager) UpdateDefinition(name string, permissions Permission) error {
+// Returns a RoleDefinitionsUpdate message if the definitions changed.
+func (rm *RoleManager) UpdateDefinition(name string, permissions Permission) (*p2ppb.RoleDefinitionsUpdate, error) {
 	rm.definitionsMu.Lock()
 	defer rm.definitionsMu.Unlock()
 
 	normalizedName := strings.ToLower(strings.TrimSpace(name))
 	if normalizedName == "" {
-		return fmt.Errorf("role name cannot be empty")
+		return nil, fmt.Errorf("role name cannot be empty")
 	}
 
-	// Store internal pointer
+	// Overwrite or add
 	rm.definitions[normalizedName] = &Role{
-		Name:        name, // Storing original casing for Name might be preferable
+		Name:        name, // Store original casing? Or normalized? Using original for display.
 		Permissions: permissions,
 	}
 
-	// TODO: Trigger broadcast
-	// Example: rm.broadcastDefinitionsUpdate()
-
-	return nil
+	// Prepare RoleDefinitionsUpdate message with all current definitions
+	allDefs := make([]*p2ppb.RoleDefinition, 0, len(rm.definitions))
+	for _, rolePtr := range rm.definitions {
+		allDefs = append(allDefs, &p2ppb.RoleDefinition{Name: rolePtr.Name, Permissions: uint32(rolePtr.Permissions)})
+	}
+	// Timestamp will be set by the caller (e.g., gRPC handler) when the event is processed
+	return &p2ppb.RoleDefinitionsUpdate{Definitions: allDefs}, nil
 }
 
 // RemoveDefinition removes a role definition.
-func (rm *RoleManager) RemoveDefinition(roleName string) error {
+// It also removes the specified role from all peer assignments.
+// Returns RoleDefinitionsUpdate and a slice of PeerRoleAssignment for affected peers.
+func (rm *RoleManager) RemoveDefinition(roleName string) (*p2ppb.RoleDefinitionsUpdate, []*p2ppb.PeerRoleAssignment, error) {
 	rm.definitionsMu.Lock()
-	defer rm.definitionsMu.Unlock()
 
 	normalizedName := strings.ToLower(strings.TrimSpace(roleName))
 	if _, exists := rm.definitions[normalizedName]; !exists {
-		return fmt.Errorf("role '%s' not defined", roleName)
+		rm.definitionsMu.Unlock()
+		return nil, nil, fmt.Errorf("role '%s' not defined", roleName)
 	}
 
+	// Delete the definition
 	delete(rm.definitions, normalizedName)
 
+	// Prepare RoleDefinitionsUpdate message
+	allDefsPb := make([]*p2ppb.RoleDefinition, 0, len(rm.definitions))
+	for _, rolePtr := range rm.definitions {
+		allDefsPb = append(allDefsPb, &p2ppb.RoleDefinition{Name: rolePtr.Name, Permissions: uint32(rolePtr.Permissions)})
+	}
+	// Timestamp will be set by the caller
+	definitionsUpdateMsg := &p2ppb.RoleDefinitionsUpdate{Definitions: allDefsPb}
+	rm.definitionsMu.Unlock()
+
 	// Now clean up assignments
+	// This needs to be done carefully with locking.
 	rm.assignmentsMu.Lock()
 	defer rm.assignmentsMu.Unlock()
 
-	peersToUpdate := []peer.ID{} // Keep track of peers whose roles changed
+	affectedAssignments := make([]*p2ppb.PeerRoleAssignment, 0)
+
 	for peerID, names := range rm.assignments {
 		newNames := make([]string, 0, len(names))
 		roleWasRemoved := false
@@ -252,7 +294,10 @@ func (rm *RoleManager) RemoveDefinition(roleName string) error {
 		}
 		// If the list changed and is now empty, delete the entry, otherwise update it
 		if roleWasRemoved {
-			peersToUpdate = append(peersToUpdate, peerID)
+			affectedAssignments = append(affectedAssignments, &p2ppb.PeerRoleAssignment{ // HlcTs set by caller
+				PeerId:            peerID.String(),
+				AssignedRoleNames: newNames,
+			})
 			if len(newNames) == 0 {
 				delete(rm.assignments, peerID)
 			} else {
@@ -261,9 +306,5 @@ func (rm *RoleManager) RemoveDefinition(roleName string) error {
 		}
 	}
 
-	// TODO: Trigger broadcast
-	// Example: rm.broadcastDefinitionsUpdate()
-	// Example: foreach peerID in peersToUpdate: rm.broadcastAssignmentUpdate(peerID, rm.assignments[peerID])
-
-	return nil
+	return definitionsUpdateMsg, affectedAssignments, nil
 }
