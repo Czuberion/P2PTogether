@@ -8,6 +8,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"peer_service/internal/common"
 	p2ppb "peer_service/proto/p2p"
 )
 
@@ -46,16 +47,22 @@ type RoleManager struct {
 	definitions   map[string]*Role
 	definitionsMu sync.RWMutex
 
-	// assignments maps peer ID to a slice of lower-case role names.
-	assignments   map[peer.ID][]string
+	// assignments maps peer ID to their assigned roles and the HLC time of that assignment.
+	assignments   map[peer.ID]peerAssignmentState
 	assignmentsMu sync.RWMutex
+}
+
+// peerAssignmentState stores the roles and the HLC timestamp of their last update.
+type peerAssignmentState struct {
+	roleNames []string
+	hlcTs     int64
 }
 
 // NewRoleManager creates a new manager, initializing definitions with defaults.
 func NewRoleManager() *RoleManager {
 	rm := &RoleManager{
 		definitions: make(map[string]*Role),
-		assignments: make(map[peer.ID][]string),
+		assignments: make(map[peer.ID]peerAssignmentState),
 	}
 
 	// Populate initial definitions from defaults
@@ -95,26 +102,27 @@ func (rm *RoleManager) GetDefinition(roleName string) (Role, bool) {
 	return *rolePtr, true
 }
 
-// GetAssignedRoles returns a slice of role names assigned to the given peer.
-// Returns an empty slice if the peer has no roles assigned.
-func (rm *RoleManager) GetAssignedRoles(peerID peer.ID) []string {
+// GetAssignedRoles returns a slice of role names assigned to the given peer and
+// the HLC timestamp of that assignment.
+// Returns an empty slice and 0 if the peer has no roles assigned.
+func (rm *RoleManager) GetAssignedRoles(peerID peer.ID) ([]string, int64) {
 	rm.assignmentsMu.RLock()
 	defer rm.assignmentsMu.RUnlock()
 
-	assigned, exists := rm.assignments[peerID]
+	state, exists := rm.assignments[peerID]
 	if !exists {
-		return []string{} // Return empty slice, not nil
+		return []string{}, 0 // Return empty slice, not nil
 	}
 	// Return a copy of the string slice
-	assignedCopy := make([]string, len(assigned))
-	copy(assignedCopy, assigned)
-	return assignedCopy
+	assignedCopy := make([]string, len(state.roleNames))
+	copy(assignedCopy, state.roleNames)
+	return assignedCopy, state.hlcTs
 }
 
 // GetPermissionsForPeer calculates the combined permission mask for a peer
 // based on their currently assigned roles and the current role definitions.
 func (rm *RoleManager) GetPermissionsForPeer(peerID peer.ID) Permission {
-	assignedNames := rm.GetAssignedRoles(peerID) // This already handles locking and copying
+	assignedNames, _ := rm.GetAssignedRoles(peerID) // Ignore HLC for permission calculation itself
 
 	var effectivePermissions Permission
 	if len(assignedNames) == 0 {
@@ -157,28 +165,52 @@ func (rm *RoleManager) SetPeerRoles(targetPeer peer.ID, roleNames []string) (*p2
 
 	// Check if the assignment actually changes to avoid unnecessary broadcasts
 	rm.assignmentsMu.Lock()
-	currentRoles := rm.assignments[targetPeer] // This is a direct slice, be careful
-	changed := !slicesEqual(currentRoles, normalizedNames)
+	currentState, exists := rm.assignments[targetPeer]
+	changed := !exists || !slicesEqual(currentState.roleNames, normalizedNames)
 
 	if changed {
+		newHlcTs := common.GetCurrentHLC() // Generate HLC timestamp for this specific assignment change
 		if len(normalizedNames) > 0 {
 			namesCopy := make([]string, len(normalizedNames))
 			copy(namesCopy, normalizedNames)
-			rm.assignments[targetPeer] = namesCopy
+			rm.assignments[targetPeer] = peerAssignmentState{
+				roleNames: namesCopy,
+				hlcTs:     newHlcTs,
+			}
 		} else {
 			delete(rm.assignments, targetPeer)
 		}
-	}
-	rm.assignmentsMu.Unlock()
+		rm.assignmentsMu.Unlock() // Unlock early if changed
 
-	if changed {
-		return &p2ppb.PeerRoleAssignment{ // HlcTs will be set by the caller
+		return &p2ppb.PeerRoleAssignment{ // HlcTs is now set based on the assignment time
 			PeerId:            targetPeer.String(),
-			AssignedRoleNames: normalizedNames, // Send the new set
+			AssignedRoleNames: normalizedNames,
+			HlcTs:             newHlcTs,
 		}, nil
 	}
-
+	rm.assignmentsMu.Unlock()
 	return nil, nil // No change, nothing to broadcast
+}
+
+// GetAllAssignments returns a snapshot of all current peer role assignments.
+// Each element in the returned slice is a PeerRoleAssignment message payload,
+// including the HLC timestamp of its last update.
+func (rm *RoleManager) GetAllAssignments() []*p2ppb.PeerRoleAssignment {
+	rm.assignmentsMu.RLock()
+	defer rm.assignmentsMu.RUnlock()
+
+	allAssignments := make([]*p2ppb.PeerRoleAssignment, 0, len(rm.assignments))
+	for peerID, state := range rm.assignments {
+		namesCopy := make([]string, len(state.roleNames))
+		copy(namesCopy, state.roleNames)
+
+		allAssignments = append(allAssignments, &p2ppb.PeerRoleAssignment{
+			PeerId:            peerID.String(),
+			AssignedRoleNames: namesCopy,
+			HlcTs:             state.hlcTs, // Use the stored HLC timestamp for this assignment
+		})
+	}
+	return allAssignments
 }
 
 // Helper function to compare two string slices (order matters for this check)
@@ -282,10 +314,10 @@ func (rm *RoleManager) RemoveDefinition(roleName string) (*p2ppb.RoleDefinitions
 
 	affectedAssignments := make([]*p2ppb.PeerRoleAssignment, 0)
 
-	for peerID, names := range rm.assignments {
-		newNames := make([]string, 0, len(names))
+	for peerID, assignmentState := range rm.assignments {
+		newNames := make([]string, 0, len(assignmentState.roleNames))
 		roleWasRemoved := false
-		for _, assignedName := range names {
+		for _, assignedName := range assignmentState.roleNames {
 			if assignedName != normalizedName {
 				newNames = append(newNames, assignedName)
 			} else {
@@ -294,15 +326,20 @@ func (rm *RoleManager) RemoveDefinition(roleName string) (*p2ppb.RoleDefinitions
 		}
 		// If the list changed and is now empty, delete the entry, otherwise update it
 		if roleWasRemoved {
-			affectedAssignments = append(affectedAssignments, &p2ppb.PeerRoleAssignment{ // HlcTs set by caller
-				PeerId:            peerID.String(),
-				AssignedRoleNames: newNames,
-			})
+			newHlcForAssignment := common.GetCurrentHLC() // New HLC for the modified assignment
 			if len(newNames) == 0 {
 				delete(rm.assignments, peerID)
 			} else {
-				rm.assignments[peerID] = newNames
+				rm.assignments[peerID] = peerAssignmentState{ // Store as peerAssignmentState
+					roleNames: newNames,
+					hlcTs:     newHlcForAssignment,
+				}
 			}
+			affectedAssignments = append(affectedAssignments, &p2ppb.PeerRoleAssignment{
+				PeerId:            peerID.String(),
+				AssignedRoleNames: newNames,
+				HlcTs:             newHlcForAssignment, // Use the new HLC for this specific update
+			})
 		}
 	}
 

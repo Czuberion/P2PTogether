@@ -69,10 +69,13 @@ func (s *server) sendInitialState(stream clientpb.P2PTClient_ControlStreamServer
 	defUpdate := &p2ppb.RoleDefinitionsUpdate{Definitions: pbDefs, HlcTs: common.GetCurrentHLC()}
 	_ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: defUpdate}}) // Error handling omitted for brevity
 
-	// 2. Send All Peer Assignments (TODO: Need RoleManager method to get all assignments)
-	// assignmentsSnapshot := s.roleManager.GetAllAssignments() // Assuming this method exists
-	// allAssignmentsMsg := &p2ppb.AllPeerRoleAssignments{Assignments: ..., HlcTs: common.GetCurrentHLC()}
-	// _ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: allAssignmentsMsg}})
+	// 2. Send All Peer Assignments
+	assignmentsSnapshot := s.roleManager.GetAllAssignments()
+	allAssignmentsMsg := &p2ppb.AllPeerRoleAssignments{
+		Assignments: assignmentsSnapshot,
+		HlcTs:       common.GetCurrentHLC(), // Timestamp for the snapshot itself
+	}
+	_ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: allAssignmentsMsg}})
 
 	// 3. Send Current Queue State
 	queueSnapshot := s.queueCtrl.Snapshot() // Assuming Snapshot() is public or accessible
