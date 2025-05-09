@@ -28,7 +28,8 @@ import (
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
 	"peer_service/internal/roles"
-	clientpb "peer_service/proto" // local import for client proto
+	clientpb "peer_service/proto"  // local import for client proto
+	p2ppb "peer_service/proto/p2p" // local import for p2p proto
 )
 
 // server implements the gRPC service defined in proto.
@@ -45,6 +46,9 @@ type server struct {
 	// Peer runtime state
 	node *p2p.Node
 
+	// Role Management
+	roleManager *roles.RoleManager
+
 	// GossipSub control topic
 	ctrlTopic *pubsub.Topic
 }
@@ -53,17 +57,37 @@ func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientp
 	return &clientpb.ServiceInfo{HlsPort: s.hlsPort}, nil
 }
 
-func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) error {
-	// pid := peer.ID("stub") // later: real peer ID from auth layer
-	// s.hub.Add(pid.String(), stream)
-	// log.Printf("Client %s connected.", pid.String()) // Log connection
+// Send initial state (role definitions, all assignments, current queue) to a newly connected client.
+func (s *server) sendInitialState(stream clientpb.P2PTClient_ControlStreamServer) {
+	// 1. Send Role Definitions
+	defs := s.roleManager.GetDefinitions()
+	pbDefs := make([]*p2ppb.RoleDefinition, 0, len(defs))
+	for _, d := range defs {
+		pbDefs = append(pbDefs, &p2ppb.RoleDefinition{Name: d.Name, Permissions: uint32(d.Permissions)})
+	}
+	defUpdate := &p2ppb.RoleDefinitionsUpdate{Definitions: pbDefs /* Add HLC TS */}
+	_ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: defUpdate}}) // Error handling omitted for brevity
 
-	// For now, assume any gRPC connection is the local GUI acting on behalf of the node.
-	// Use the node's actual ID for tracking and identification within the hub.
-	// A proper system would involve authentication to get the remote client's ID.
+	// 2. Send All Peer Assignments (TODO: Need RoleManager method to get all assignments)
+	// assignmentsSnapshot := s.roleManager.GetAllAssignments() // Assuming this method exists
+	// allAssignmentsMsg := &p2ppb.AllPeerRoleAssignments{...} // Populate this
+	// _ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: allAssignmentsMsg}})
+
+	// 3. Send Current Queue State
+	queueSnapshot := s.queueCtrl.Snapshot() // Assuming Snapshot() is public or accessible
+	_ = stream.Send(queueSnapshot)
+
+	log.Printf("Sent initial state (roles, queue) to client for node %s", s.node.ID())
+}
+
+func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) error {
 	nodeIDStr := s.node.ID().String()
 	s.hub.Add(nodeIDStr, stream)
 	log.Printf("Client connection associated with node %s added to hub.", nodeIDStr)
+
+	// Send initial state upon connection
+	s.sendInitialState(stream)
+
 	defer func() {
 		// s.hub.Remove(pid.String())
 		// log.Printf("Client %s removed from hub.", pid.String()) // Log removal
@@ -72,17 +96,14 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 	}()
 
 	for {
-		in, err := stream.Recv()
+		clientMsg, err := stream.Recv()
 		if err != nil {
-			// Log client disconnection reason
-			// log.Printf("Client %s disconnected: %v", pid.String(), err)
 			log.Printf("Client associated with node %s disconnected: %v", nodeIDStr, err)
 			return err // Return error to signal stream closure
 		}
 
-		switch x := in.Payload.(type) {
+		switch cmd := clientMsg.Payload.(type) {
 		case *clientpb.ClientMsg_QueueCmd:
-			perms := s.node.Permissions()
 
 			// Pass context from stream for cancellation propagation if Publish blocks.
 			// Pass s.node and s.ctrlTopic for Handle to use.
@@ -90,7 +111,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			// 	log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
 
 			// Pass the node's ID as the 'sender' for commands originating from the local gRPC client.
-			if err := s.queueCtrl.Handle(stream.Context(), x.QueueCmd, s.node.ID(), perms, s.hub, s.node, s.ctrlTopic); err != nil {
+
+			// Permission check now happens inside Handle using RoleManager
+			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, s.node.ID(), s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
 				log.Printf("Error handling QueueCmd from local client (node %s): %v", nodeIDStr, err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
@@ -99,6 +122,28 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			log.Printf("Received unhandled message type from %s", nodeIDStr)
 		}
 	}
+}
+
+// Handle incoming SetPeerRolesCmd
+func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRolesCmd, senderID peer.ID) {
+	// 1. Check if sender has permission to manage roles
+	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+	if !senderPerms.Has(roles.PermManageUserRoles) {
+		log.Printf("Permission denied: Peer %s lacks PermManageUserRoles to set roles for %s", senderID, cmd.TargetPeerId)
+		// Optionally send an error back to the sender via gRPC stream?
+		return
+	}
+
+	// 2. Decode target peer ID and call RoleManager
+	targetPeerID, err := peer.Decode(cmd.TargetPeerId)
+	if err != nil {
+		log.Printf("Failed to decode target peer ID '%s': %v", cmd.TargetPeerId, err)
+		return // Handle error appropriately
+	}
+
+	err = s.roleManager.SetPeerRoles(targetPeerID, cmd.AssignedRoleNames)
+	// ... (Error handling for SetPeerRoles) ...
+	// SetPeerRoles should trigger broadcasts via Hub/Topic if successful
 }
 
 // mdnsNotifee prints every peer it discovers on the LAN.
@@ -139,7 +184,7 @@ func buildHost(ctx context.Context) host.Host {
 }
 
 // pumpQueueUpdates handles incoming QueueUpdate messages from GossipSub.
-func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.QueueController, myID peer.ID, localHub *p2p.Hub, processingNode *p2p.Node) {
+func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.QueueController, myID peer.ID, localHub *p2p.Hub, processingNode *p2p.Node, rm *roles.RoleManager) {
 	log.Println("[gossip] pumpQueueUpdates started for peer", myID)
 	for {
 		msg, err := sub.Next(ctx)
@@ -162,37 +207,21 @@ func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.Que
 			continue
 		}
 
-		queueUpdateMsg, ok := serverMsg.GetPayload().(*clientpb.ServerMsg_QueueUpdate)
-		if !ok {
+		switch payload := serverMsg.GetPayload().(type) {
+		case *clientpb.ServerMsg_QueueUpdate:
+			log.Printf("[gossip] pumpQueueUpdates: received QueueUpdate from %s", msg.ReceivedFrom)
+			qc.ApplyUpdate(payload.QueueUpdate, localHub, processingNode, rm) // Pass rm
+			// TODO: Handle other message types like RoleDefinitionsUpdate, PeerRoleAssignment
 			// log.Printf("[gossip] pumpQueueUpdates: received ServerMsg from %s is not QueueUpdate. Type: %T", msg.ReceivedFrom, serverMsg.GetPayload())
-			continue // Not a QueueUpdate message
 		}
-
-		log.Printf("[gossip] pumpQueueUpdates: received QueueUpdate from %s with %d items", msg.ReceivedFrom, len(queueUpdateMsg.QueueUpdate.GetItems()))
-		// Apply the update to the local queue state. This will also trigger local GUI update and runner check.
-		qc.ApplyUpdate(queueUpdateMsg.QueueUpdate, localHub, processingNode)
 	}
 }
 
 func main() {
 	// flags
 	var grpcPort int
-	var initialRolesStr string
 	flag.IntVar(&grpcPort, "grpc-port", 0, "gRPC listen port")
-	flag.StringVar(&initialRolesStr, "roles", "viewer", "Comma-separated initial roles for this peer (e.g., viewer,streamer,admin)")
 	flag.Parse()
-
-	// Parse initial roles
-	parsedRoles, err := roles.ParseRoles(initialRolesStr)
-	if err != nil {
-		log.Fatalf("Failed to parse initial roles from flag '%s': %v", initialRolesStr, err)
-	}
-	if len(parsedRoles) == 0 { // Ensure at least one role, default to viewer if parsing somehow results in empty
-		log.Printf("Warning: No valid roles parsed from '%s', defaulting to 'viewer'", initialRolesStr)
-		viewerRole, _ := roles.ParseRoles("viewer") // This should always succeed
-		parsedRoles = viewerRole
-	}
-	log.Printf("Initializing peer with roles: %s", initialRolesStr)
 
 	// 1) Start HTTP mini-HLS on a random port
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -238,13 +267,14 @@ func main() {
 	grpcServer := grpc.NewServer()
 	hub := p2p.NewHub()
 	queueCtrl := p2p.NewQueueController()
+	roleManager := roles.NewRoleManager()
 
 	// 3) libp2p + GossipSub
 
-	ctx := context.Background()
+	ctx, cancelCtx := context.WithCancel(context.Background())
 
 	lhost := buildHost(ctx)
-	node := p2p.NewNodeWithRoles(lhost, hlsPort, parsedRoles)
+	node := p2p.NewNode(lhost, hlsPort)
 
 	ps, err := pubsub.NewGossipSub(ctx, lhost)
 	if err != nil {
@@ -261,13 +291,12 @@ func main() {
 
 	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
 
-	// Subscribe to the control topic to receive QueueUpdate messages from other peers.
-	// The pumpQueueUpdates goroutine will process these messages.
+	// Subscribe to the control topic for various ServerMsg types
 	subCtrl, err := ctrlTopic.Subscribe()
 	if err != nil {
 		log.Fatalf("ctrl topic subscribe: %v", err)
 	}
-	go pumpQueueUpdates(ctx, subCtrl, queueCtrl, lhost.ID(), hub, node)
+	go pumpQueueUpdates(ctx, subCtrl, queueCtrl, lhost.ID(), hub, node, roleManager)
 
 	//  Peer‑connected / peer‑lost trace
 	sub, err := lhost.EventBus().Subscribe(
@@ -290,11 +319,12 @@ func main() {
 	}()
 
 	clientpb.RegisterP2PTClientServer(grpcServer, &server{
-		hlsPort:   hlsPort,
-		hub:       hub,
-		queueCtrl: queueCtrl,
-		node:      node,
-		ctrlTopic: ctrlTopic,
+		hlsPort:     hlsPort,
+		hub:         hub,
+		queueCtrl:   queueCtrl,
+		node:        node,
+		roleManager: roleManager,
+		ctrlTopic:   ctrlTopic,
 	})
 
 	// fan‑out StreamStatus to every connected client
@@ -326,6 +356,10 @@ func main() {
 	sig := <-stopChan                                                // Block until a signal is received
 	log.Printf("Received signal: %v. Shutting down servers...", sig) // Log received signal
 
+	// Cancel the main context to signal background goroutines
+	log.Println("Cancelling main context...")
+	cancelCtx()
+
 	// Shutdown gRPC server - Use Stop() instead of GracefulStop()
 	log.Println("Attempting gRPC server Stop()...")
 	grpcServer.Stop()                            // Force immediate stop
@@ -345,7 +379,7 @@ func main() {
 
 	// Add a small delay to see if goroutines finish and logs appear
 	log.Println("Waiting briefly before final exit...")
-	time.Sleep(1 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	log.Println("Peer service exited gracefully.")
 }

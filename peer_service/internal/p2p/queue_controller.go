@@ -24,7 +24,7 @@ func (qc *QueueController) Q() *Queue {
 	return qc.q
 }
 
-func (qc *QueueController) snapshot() *clientpb.ServerMsg {
+func (qc *QueueController) Snapshot() *clientpb.ServerMsg {
 	it := qc.q.Items()
 	pbItems := make([]*p2ppb.QueueItem, 0, len(it))
 	for _, x := range it {
@@ -42,9 +42,11 @@ func (qc *QueueController) snapshot() *clientpb.ServerMsg {
 
 // Handle processes a queue command, mutates the queue, and notifies local/remote clients.
 // It is called when a local gRPC client sends a QueueCmd.
+// It uses the RoleManager to check permissions.
 // The `ctrlTopic` is for publishing the update via GossipSub.
-func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, sender peer.ID, perms roles.Permission, hub *Hub, node *Node, ctrlTopic *pubsub.Topic) error {
-	if !roles.HasPermission(roles.PermQueue, perms) {
+func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, sender peer.ID, rm *roles.RoleManager, hub *Hub, node *Node, ctrlTopic *pubsub.Topic) error {
+	perms := rm.GetPermissionsForPeer(sender) // Get permissions for the sender
+	if !perms.Has(roles.PermQueue) {
 		return fmt.Errorf("permission denied: missing Queue perm")
 	}
 
@@ -66,7 +68,7 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 
 	// After any successful mutation:
 	// 1. Notify local GUI client(s) via Hub
-	snapshotMsg := qc.snapshot()
+	snapshotMsg := qc.Snapshot()
 	if hub != nil {
 		hub.Broadcast(snapshotMsg)
 	}
@@ -86,14 +88,14 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 	}
 
 	// 3. Trigger queue-to-runner glue logic
-	node.ReactToQueueUpdate(qc)
+	node.ReactToQueueUpdate(qc, rm)
 	return nil
 }
 
 // ApplyUpdate replaces the entire local queue state with the items from the received update.
 // This is called when a QueueUpdate is received from GossipSub.
-// node is passed to facilitate calling ReactToQueueUpdate
-func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub, node *Node) {
+// node and rm are passed to facilitate calling ReactToQueueUpdate.
+func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub, node *Node, rm *roles.RoleManager) {
 	newItems := make([]QueueItem, 0, len(update.Items))
 	for _, pbItem := range update.Items {
 		storedByID, errStored := peer.Decode(pbItem.StoredBy)
@@ -116,9 +118,9 @@ func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub,
 	qc.q.ReplaceItems(newItems)
 
 	if localHub != nil { // Notify local GUI client about the change
-		localHub.Broadcast(qc.snapshot())
+		localHub.Broadcast(qc.Snapshot())
 	}
 
 	// Trigger queue-to-runner glue
-	node.ReactToQueueUpdate(qc)
+	node.ReactToQueueUpdate(qc, rm)
 }

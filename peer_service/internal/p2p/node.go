@@ -3,9 +3,7 @@ package p2p
 import (
 	"context"
 	"log"
-	"reflect"
 	"sync"
-	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -25,9 +23,6 @@ type Node struct {
 
 	// ------------------- mutable, app‑specific -------------------
 	mu sync.RWMutex
-
-	roles        []*roles.Role // active role set (copy, detached from map)
-	rolesUpdated time.Time     // monotonic; for conflict‑resolution
 
 	hlsPort     uint32 // 127.0.0.1:<port> for local mini‑HLS
 	encoderLive bool   // ffmpeg running right now on *this* peer?
@@ -53,58 +48,10 @@ type Node struct {
 // -------------- constructors --------------
 
 func NewNode(h host.Host, hlsPort uint32) *Node {
-	// default to a single Viewer role
-	roles.AllRolesMu.RLock()
-	viewer := roles.AllRoles["viewer"]
-	roles.AllRolesMu.RUnlock()
-
 	return &Node{
 		Host:    h,
 		hlsPort: hlsPort,
-		roles:   []*roles.Role{viewer},
 	}
-}
-
-// NewNodeWithRoles creates a new Node with the specified initial roles for debugging
-func NewNodeWithRoles(h host.Host, hlsPort uint32, initialRoles []*roles.Role) *Node {
-	return &Node{
-		Host:    h,
-		hlsPort: hlsPort,
-		roles:   append([]*roles.Role(nil), initialRoles...), // Store a copy
-	}
-}
-
-// -------------- role / permission helpers --------------
-
-// Roles returns a copy of the current role set.
-func (n *Node) Roles() []*roles.Role {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	out := make([]*roles.Role, len(n.roles))
-	copy(out, n.roles)
-	return out
-}
-
-// SetRoles replaces the role set and returns true if it really changed.
-func (n *Node) SetRoles(rs []*roles.Role) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if reflect.DeepEqual(rs, n.roles) {
-		return false
-	}
-	// store a detached copy
-	n.roles = append([]*roles.Role(nil), rs...)
-	n.rolesUpdated = time.Now()
-	return true
-}
-
-// Permissions returns the OR‑ed permission mask that results from the
-// active role set.  Callers must *not* cache the result.
-func (n *Node) Permissions() roles.Permission {
-	n.mu.RLock()
-	perms := roles.PermissionsForRoles(n.roles...)
-	n.mu.RUnlock()
-	return perms
 }
 
 // -------------- encoder / streaming helpers --------------
@@ -134,7 +81,8 @@ func (n *Node) NextMediaSeq() uint32 {
 // EnsureRunnerState manages the ffmpeg encoder runner based on the desired state.
 // If filePath is empty, it ensures the runner is stopped.
 // Otherwise, it ensures the runner is active for filePath with seqBase if this peer should be streaming.
-func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueController) {
+// It requires the RoleManager to check permissions.
+func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueController, rm *roles.RoleManager) {
 	n.mu.Lock() // Node's main mutex
 	defer n.mu.Unlock()
 
@@ -145,12 +93,14 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueContr
 
 	shouldRun := false
 	if filePath != "" { // An empty filePath signals to stop.
-		// This logic is specific to "if I am StoredBy for head and have PermStream"
-		// It's called by ReactToQueueUpdate which already checks this.
-		// For more generic use, filePath and seqBase would be the sole drivers.
-		// Here, we re-verify based on current queue state.
+		// Re-verify conditions based on current state.
 		head, ok := qc.Q().Head() // Assuming Q() and Head() are safe or called under appropriate lock
-		if ok && head.FilePath == filePath && head.StoredBy == n.ID() && roles.HasPermissionFromRoles(roles.PermStream, n.roles...) {
+
+		// Check permission using RoleManager
+		nodePerms := rm.GetPermissionsForPeer(n.ID())
+
+		// Check StoredBy and if this node has streaming permission
+		if ok && head.FilePath == filePath && head.StoredBy == n.ID() && nodePerms.Has(roles.PermStream) {
 			shouldRun = true
 		}
 	}
@@ -196,29 +146,34 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32, qc *QueueContr
 	}
 }
 
-func (n *Node) ReactToQueueUpdate(qc *QueueController) {
+// ReactToQueueUpdate checks the queue and node permissions (via RoleManager)
+// and calls EnsureRunnerState accordingly.
+func (n *Node) ReactToQueueUpdate(qc *QueueController, rm *roles.RoleManager) {
 	log.Printf("Node.ReactToQueueUpdate: Checking runner state for peer %s", n.ID())
 	head, ok := qc.Q().Head()
+
+	// Get current node permissions
+	nodePerms := rm.GetPermissionsForPeer(n.ID())
 
 	log.Printf("ReactToQueueUpdate: Current Node ID: %s", n.ID())
 	if ok { // if head item exists
 		log.Printf("ReactToQueueUpdate: Queue head StoredBy: %s, FilePath: %s", head.StoredBy, head.FilePath)
 	}
-	log.Printf("ReactToQueueUpdate: Node has PermStream: %v", roles.HasPermissionFromRoles(roles.PermStream, n.roles...))
+	log.Printf("ReactToQueueUpdate: Node has PermStream: %v", nodePerms.Has(roles.PermStream))
 	if !ok {
 		log.Println("Node.ReactToQueueUpdate: Queue is empty. Ensuring runner is stopped.")
-		n.EnsureRunnerState("", 0, qc) // Pass qc for re-verification inside EnsureRunnerState
+		n.EnsureRunnerState("", 0, qc, rm)
 		return
 	}
 
 	var seqBase uint32
-	if head.StoredBy == n.ID() && roles.HasPermissionFromRoles(roles.PermStream, n.roles...) {
+	if head.StoredBy == n.ID() && nodePerms.Has(roles.PermStream) {
 		seqBase = n.NextMediaSeq() // Or more sophisticated seqBase logic
 		log.Printf("Node.ReactToQueueUpdate: Head item for me. Ensuring runner for: %s, seqBase %d", head.FilePath, seqBase)
-		n.EnsureRunnerState(head.FilePath, seqBase, qc)
+		n.EnsureRunnerState(head.FilePath, seqBase, qc, rm)
 	} else {
 		log.Println("Node.ReactToQueueUpdate: Head item not for me or no PermStream. Ensuring runner is stopped.")
-		n.EnsureRunnerState("", 0, qc)
+		n.EnsureRunnerState("", 0, qc, rm)
 	}
 }
 
