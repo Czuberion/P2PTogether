@@ -303,17 +303,17 @@ func buildHost(ctx context.Context) host.Host {
 	return h
 }
 
-// pumpQueueUpdates handles incoming QueueUpdate messages from GossipSub.
-func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.QueueController, myID peer.ID, localHub *p2p.Hub, processingNode *p2p.Node, rm *roles.RoleManager) {
-	log.Println("[gossip] pumpQueueUpdates started for peer", myID)
+// processControlTopicMessages handles all incoming ServerMsg messages from the ctrlTopic.
+func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, qc *p2p.QueueController, rm *roles.RoleManager, myID peer.ID, localHub *p2p.Hub, node *p2p.Node) {
+	log.Println("[gossip] processControlTopicMessages started for peer", myID)
 	for {
 		msg, err := sub.Next(ctx)
 		if err != nil {
-			log.Printf("[gossip] pumpQueueUpdates: subscription error: %v", err)
 			if ctx.Err() != nil {
 				log.Println("[gossip] pumpQueueUpdates: context cancelled, exiting.")
 				return
 			}
+			log.Printf("[gossip] processControlTopicMessages: subscription error: %v", err)
 			return // Exit on other errors too for simplicity
 		}
 
@@ -323,16 +323,82 @@ func pumpQueueUpdates(ctx context.Context, sub *pubsub.Subscription, qc *p2p.Que
 
 		var serverMsg clientpb.ServerMsg
 		if err := proto.Unmarshal(msg.Data, &serverMsg); err != nil {
-			log.Printf("[gossip] pumpQueueUpdates: failed to unmarshal ServerMsg from %s: %v", msg.ReceivedFrom, err)
+			log.Printf("[gossip] processControlTopicMessages: failed to unmarshal ServerMsg from %s: %v", msg.ReceivedFrom, err)
 			continue
 		}
 
 		switch payload := serverMsg.GetPayload().(type) {
 		case *clientpb.ServerMsg_QueueUpdate:
-			log.Printf("[gossip] pumpQueueUpdates: received QueueUpdate from %s", msg.ReceivedFrom)
-			qc.ApplyUpdate(payload.QueueUpdate, localHub, processingNode, rm) // Pass rm
-			// TODO: Handle other message types like RoleDefinitionsUpdate, PeerRoleAssignment
-			// log.Printf("[gossip] pumpQueueUpdates: received ServerMsg from %s is not QueueUpdate. Type: %T", msg.ReceivedFrom, serverMsg.GetPayload())
+			handleGossipQueueUpdate(payload.QueueUpdate, msg.ReceivedFrom, qc, rm, localHub, node)
+		case *clientpb.ServerMsg_RoleDefinitionsUpdate:
+			handleGossipRoleDefinitionsUpdate(payload.RoleDefinitionsUpdate, msg.ReceivedFrom, rm, localHub, node, qc)
+		case *clientpb.ServerMsg_PeerRoleAssignment:
+			handleGossipPeerRoleAssignment(payload.PeerRoleAssignment, msg.ReceivedFrom, rm, localHub, node, qc, myID)
+		case *clientpb.ServerMsg_AllPeerRoleAssignments:
+			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, rm, localHub, node, qc)
+		default:
+			log.Printf("[gossip] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
+		}
+	}
+}
+
+func handleGossipQueueUpdate(update *p2ppb.QueueUpdate, from peer.ID, qc *p2p.QueueController, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node) {
+	log.Printf("[gossip] handleGossipQueueUpdate: received from %s (HLC: %d)", from, update.HlcTs)
+	qc.ApplyUpdate(update, hub, node, rm) // ApplyUpdate in QC needs rm for ReactToQueueUpdate
+}
+
+func handleGossipRoleDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate, from peer.ID, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node, qc *p2p.QueueController) {
+	log.Printf("[gossip] handleGossipRoleDefinitionsUpdate: received from %s (HLC: %d)", from, update.HlcTs)
+	if err := rm.ApplyDefinitionsUpdate(update); err != nil {
+		log.Printf("[gossip] Error applying RoleDefinitionsUpdate from %s: %v", from, err)
+	} else {
+		// Successfully applied. Notify local GUI clients about the change in definitions.
+		log.Printf("[gossip] Applied RoleDefinitionsUpdate from %s. Broadcasting to local hub.", from)
+		serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: update}}
+		hub.Broadcast(serverMsg)
+		// Note: Applying new definitions might change effective permissions for *many* peers.
+		// A more advanced system might re-evaluate and broadcast individual PeerRoleAssignments
+		// if effective permissions changed, or simply expect clients to re-calculate.
+		// For now, also re-evaluate this node's runner state as its permissions might have changed.
+		// This is a broad action; finer-grained reactions could be implemented.
+		if node != nil && qc != nil { // qc needed by ReactToQueueUpdate
+			node.ReactToQueueUpdate(qc, rm)
+		}
+	}
+}
+
+func handleGossipPeerRoleAssignment(assignment *p2ppb.PeerRoleAssignment, from peer.ID, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node, qc *p2p.QueueController, myID peer.ID) {
+	log.Printf("[gossip] handleGossipPeerRoleAssignment: for peer %s from %s (HLC: %d)", assignment.PeerId, from, assignment.HlcTs)
+	targetPeerID, err := peer.Decode(assignment.PeerId)
+	if err != nil {
+		log.Printf("[gossip] Invalid peer ID '%s' in PeerRoleAssignment from %s: %v", assignment.PeerId, from, err)
+		return
+	}
+	changed, err := rm.ApplyPeerAssignment(targetPeerID, assignment.AssignedRoleNames, assignment.HlcTs)
+	if err != nil {
+		log.Printf("[gossip] Error applying PeerRoleAssignment for %s from %s: %v", targetPeerID, from, err)
+	} else if changed {
+		log.Printf("[gossip] Applied PeerRoleAssignment for %s from %s.", targetPeerID, from)
+		// Notify local GUI about this specific assignment change
+		serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignment}}
+		hub.Broadcast(serverMsg)
+		if targetPeerID == myID && node != nil && qc != nil { // If this node's roles changed
+			log.Printf("[gossip] Own roles changed due to PeerRoleAssignment from %s. Re-evaluating runner.", from)
+			node.ReactToQueueUpdate(qc, rm)
+		}
+	}
+}
+
+func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, from peer.ID, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node, qc *p2p.QueueController) {
+	log.Printf("[gossip] handleGossipAllPeerRoleAssignments: received from %s (HLC: %d)", from, snapshot.HlcTs)
+	if err := rm.ApplyAllAssignmentsSnapshot(snapshot); err != nil {
+		log.Printf("[gossip] Error applying AllPeerRoleAssignments from %s: %v", from, err)
+	} else {
+		log.Printf("[gossip] Applied AllPeerRoleAssignments from %s. Broadcasting to local hub and re-evaluating runner.", from)
+		serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: snapshot}}
+		hub.Broadcast(serverMsg)
+		if node != nil && qc != nil {
+			node.ReactToQueueUpdate(qc, rm)
 		}
 	}
 }
@@ -416,7 +482,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("ctrl topic subscribe: %v", err)
 	}
-	go pumpQueueUpdates(ctx, subCtrl, queueCtrl, lhost.ID(), hub, node, roleManager)
+	go processControlTopicMessages(ctx, subCtrl, queueCtrl, roleManager, lhost.ID(), hub, node)
 
 	//  Peer‑connected / peer‑lost trace
 	sub, err := lhost.EventBus().Subscribe(

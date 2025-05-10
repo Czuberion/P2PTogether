@@ -345,3 +345,100 @@ func (rm *RoleManager) RemoveDefinition(roleName string) (*p2ppb.RoleDefinitions
 
 	return definitionsUpdateMsg, affectedAssignments, nil
 }
+
+// --- Methods for applying updates received from other peers ---
+
+// ApplyDefinitionsUpdate replaces the current role definitions with the received set.
+// It should be called when a RoleDefinitionsUpdate is received via GossipSub.
+// Returns an error if validation fails, or nil on success.
+func (rm *RoleManager) ApplyDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate) error {
+	if update == nil {
+		return fmt.Errorf("received nil RoleDefinitionsUpdate")
+	}
+	// TODO: Advanced HLC - compare update.HlcTs with a locally stored timestamp
+	// for the last definitions update to handle out-of-order messages or conflicts.
+	// For now, we'll assume the incoming update is authoritative or newer.
+
+	rm.definitionsMu.Lock()
+	defer rm.definitionsMu.Unlock()
+
+	newDefinitions := make(map[string]*Role)
+	for _, defProto := range update.Definitions {
+		if defProto == nil || defProto.Name == "" {
+			// Log or handle invalid definition entry
+			continue
+		}
+		normalizedName := strings.ToLower(defProto.Name)
+		newDefinitions[normalizedName] = &Role{
+			Name:        defProto.Name, // Store original casing for display
+			Permissions: Permission(defProto.Permissions),
+		}
+	}
+	rm.definitions = newDefinitions
+	// TODO: Consider if peer permissions need recalculation and if relevant events should be emitted.
+	// This might involve iterating through all assignments and re-evaluating effective permissions.
+	// For now, clients are expected to recalculate permissions based on new definitions.
+	return nil
+}
+
+// ApplyPeerAssignment applies a role assignment update for a single peer.
+// It uses HLC timestamps to ensure only newer updates are applied.
+// Returns true if the assignment was actually changed, false otherwise, and an error.
+func (rm *RoleManager) ApplyPeerAssignment(peerID peer.ID, assignedRoleNames []string, incomingHlcTs int64) (bool, error) {
+	// Validate role names against current definitions (read lock on definitions)
+	normalizedNames := make([]string, 0, len(assignedRoleNames))
+	rm.definitionsMu.RLock()
+	for _, name := range assignedRoleNames {
+		normName := strings.ToLower(strings.TrimSpace(name))
+		if _, exists := rm.definitions[normName]; !exists {
+			rm.definitionsMu.RUnlock()
+			return false, fmt.Errorf("role '%s' in assignment for peer %s not defined", name, peerID)
+		}
+		if normName != "" {
+			normalizedNames = append(normalizedNames, normName)
+		}
+	}
+	rm.definitionsMu.RUnlock()
+
+	rm.assignmentsMu.Lock()
+	defer rm.assignmentsMu.Unlock()
+
+	currentState, exists := rm.assignments[peerID]
+	// Only apply if incoming is newer, or if no current state exists
+	if !exists || incomingHlcTs > currentState.hlcTs {
+		if len(normalizedNames) > 0 {
+			rm.assignments[peerID] = peerAssignmentState{
+				roleNames: normalizedNames, // Already copied if needed by caller or use directly
+				hlcTs:     incomingHlcTs,
+			}
+		} else { // If new assignment is empty roles, delete the assignment
+			delete(rm.assignments, peerID)
+		}
+		return true, nil // Assignment was changed
+	}
+	return false, nil // No change made (incoming was older or same)
+}
+
+// ApplyAllAssignmentsSnapshot applies a full snapshot of all peer role assignments.
+// This should be handled carefully to avoid overwriting newer individual updates.
+func (rm *RoleManager) ApplyAllAssignmentsSnapshot(snapshot *p2ppb.AllPeerRoleAssignments) error {
+	// TODO: Implement HLC logic for the snapshot itself (e.g., snapshot.HlcTs vs local last snapshot HLC).
+	// For each assignment in snapshot.Assignments, call ApplyPeerAssignment.
+	// This ensures individual HLC checks are respected.
+	if snapshot == nil {
+		return fmt.Errorf("received nil AllPeerRoleAssignments snapshot")
+	}
+	for _, assignmentProto := range snapshot.Assignments {
+		if assignmentProto == nil {
+			continue
+		}
+		peerID, err := peer.Decode(assignmentProto.PeerId)
+		if err != nil {
+			// Log or handle invalid peer ID in snapshot
+			continue
+		}
+		// The ApplyPeerAssignment method already handles HLC checks internally
+		_, _ = rm.ApplyPeerAssignment(peerID, assignmentProto.AssignedRoleNames, assignmentProto.HlcTs)
+	}
+	return nil
+}
