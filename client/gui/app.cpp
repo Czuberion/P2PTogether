@@ -3,6 +3,7 @@
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
 #include "player/mpv_manager.h"
+#include "roles/role_store.h"
 #include "transport/control_stream_worker.h"
 #include "transport/grpc_client.h"
 
@@ -49,6 +50,9 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     QString hlsUrl = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
     player::MpvManager mpvManager(hlsUrl);
 
+    // --- Instantiate RoleStore ---
+    P2P::Roles::RoleStore roleStore;
+
     // --- Main Window Setup ---
     QMainWindow window;
     window.setWindowTitle("P2PTogether");
@@ -66,10 +70,37 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
                          qWarning() << "[control‑stream]" << reason;
                      });
 
+    // --- Connect ControlStreamWorker::serverMsg to RoleStore and other
+    // handlers ---
     QObject::connect(worker, &P2P::ControlStreamWorker::serverMsg, &window,
-                     [](const client::ServerMsg& msg) {
+                     [&roleStore](const client::ServerMsg& msg) {
                          qDebug() << "[control‑stream] received payload type"
                                   << msg.payload_case();
+                         // Delegate to RoleStore for role-related messages
+                         switch (msg.payload_case()) {
+                         case client::ServerMsg::kRoleDefinitionsUpdate:
+                             // Use QMetaObject::invokeMethod if roleStore might
+                             // be in a different thread or if its methods are
+                             // not reentrant and worker is on another thread.
+                             // For now, assuming direct call is okay if signals
+                             // are queued or same thread. QueuedConnection on
+                             // the original connect() helps here.
+                             roleStore.processRoleDefinitionsUpdate(
+                                 msg.role_definitions_update());
+                             break;
+                         case client::ServerMsg::kPeerRoleAssignment:
+                             roleStore.processPeerRoleAssignment(
+                                 msg.peer_role_assignment());
+                             break;
+                         case client::ServerMsg::kAllPeerRoleAssignments:
+                             roleStore.processAllPeerAssignments(
+                                 msg.all_peer_role_assignments());
+                             break;
+                         // TODO: Add cases for kQueueUpdate to update
+                         // QListWidget (as done previously) and other ServerMsg
+                         // types.
+                         default: break;
+                         }
                      });
 
     worker->moveToThread(netThread);
@@ -128,7 +159,7 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     mainSplitter->addWidget(leftPanel);
 
     // Right panel: chat, queue, etc.
-    QWidget* rightPanel = createRightPanel(peer, &window, worker);
+    QWidget* rightPanel = createRightPanel(peer, &window, worker, &roleStore);
     mainSplitter->addWidget(rightPanel);
     rightPanel->setMinimumWidth(300);
 
@@ -139,7 +170,8 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     mainSplitter->setCollapsible(0, false); // Keep video panel always visible
 
     // Create menus
-    createMenus(&window, peer, mainSplitter, rightPanel, leftPanel);
+    createMenus(&window, peer, &roleStore, mainSplitter, rightPanel, leftPanel,
+                worker);
 
     window.show();
     // Return the exit code from the application event loop

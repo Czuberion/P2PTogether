@@ -155,22 +155,36 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 	}
 
 	// 2. Decode target peer ID and call RoleManager
-	targetPeerID, err := peer.Decode(cmd.TargetPeerId)
-	if err != nil {
-		log.Printf("Failed to decode target peer ID '%s' for SetPeerRolesCmd: %v", cmd.TargetPeerId, err)
-		return
-	}
+	// targetPeerID, err := peer.Decode(cmd.TargetPeerId)
+	// if err != nil {
+	// 	log.Printf("Failed to decode target peer ID '%s' for SetPeerRolesCmd: %v", cmd.TargetPeerId, err)
+	// 	return
+	// }
 
-	assignmentMsg, err := s.roleManager.SetPeerRoles(targetPeerID, cmd.AssignedRoleNames)
+	// assignmentMsg, err := s.roleManager.SetPeerRoles(targetPeerID, cmd.AssignedRoleNames)
+
+	// If the command's target_peer_id is the special "defaultPeerId" (or matches senderID),
+	// it means the client is trying to change its own roles (the roles of the node this service instance represents).
+	// In this case, the actual target for RoleManager is senderID (s.node.ID()).
+	actualTargetPeerID := senderID // By default, assume sender is changing their own roles.
+
+	// If cmd.TargetPeerId were a *different, valid* peer ID, we'd decode and use that.
+	// For now, since GUI sends "defaultPeerId" for self, and senderID is s.node.ID(),
+	// we use senderID as the target for RoleManager.SetPeerRoles.
+	// This block can be expanded if GUI starts sending actual other peer IDs.
+
+	assignmentMsg, err := s.roleManager.SetPeerRoles(actualTargetPeerID, cmd.AssignedRoleNames)
 	if err != nil {
-		log.Printf("Error setting peer roles for %s: %v", targetPeerID, err)
+		// log.Printf("Error setting peer roles for %s: %v", targetPeerID, err)
+		log.Printf("Error setting peer roles for %s: %v", actualTargetPeerID, err)
 		// Optionally send an error back to the client
 		return
 	}
 
 	if assignmentMsg != nil { // If there was a change
 		assignmentMsg.HlcTs = common.GetCurrentHLC() // Set HLC timestamp on the generated message
-		log.Printf("Broadcasting PeerRoleAssignment for %s", targetPeerID)
+		// log.Printf("Broadcasting PeerRoleAssignment for %s", targetPeerID)
+		log.Printf("Broadcasting PeerRoleAssignment for %s", actualTargetPeerID)
 		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
 		s.hub.Broadcast(serverPayload)
 		if marshalledMsg, merr := proto.Marshal(serverPayload); merr != nil {
@@ -461,6 +475,16 @@ func main() {
 
 	lhost := buildHost(ctx)
 	node := p2p.NewNode(lhost, hlsPort)
+
+	// Assign default roles (e.g., "Admin" or "Streamer,Viewer") to the service's own node ID
+	// This allows the service itself (when acting as sender) to have permissions.
+	// For testing self-role changes via GUI, it needs PermManageUserRoles if target is self.
+	// Giving Admin role to self for now for full testing capability.
+	_, err = roleManager.SetPeerRoles(node.ID(), []string{"Admin"}) // Assign "Admin" to self
+	if err != nil {
+		log.Fatalf("Failed to set initial self-roles for service node: %v", err)
+	}
+	log.Printf("Service node %s initialized with Admin role in RoleManager.", node.ID())
 
 	ps, err := pubsub.NewGossipSub(ctx, lhost)
 	if err != nil {

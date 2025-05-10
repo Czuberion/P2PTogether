@@ -1,5 +1,6 @@
 #include "menus.h"
 #include "gui/right_panel.h"
+#include "roles/permissions.h"
 #include <QAction>
 #include <QComboBox>
 #include <QDebug>
@@ -23,8 +24,100 @@ namespace gui {
 
 std::function<void()> SidebarToggleCallback;
 
-void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,
-                 QWidget* rightPanel, QWidget* leftPanel) {
+// Helper function to rebuild the roles submenu
+// This needs access to rolesMenu, roleStore, worker, and myPeerIdStd
+static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
+                             P2P::ControlStreamWorker* worker,
+                             const std::string& myPeerIdStd,
+                             QMainWindow* window) {
+    if (!rolesMenu || !roleStore || !worker)
+        return;
+    QString myPeerIdQString = QString::fromStdString(myPeerIdStd);
+
+    qDebug() << "rebuildRolesMenu: Rebuilding for peer:" << myPeerIdQString;
+
+    rolesMenu->clear(); // Clear existing role actions
+
+    QMap<QString, client::p2p::RoleDefinition> definitions =
+        roleStore->getRoleDefinitions();
+    QVector<QString> currentMyRoles =
+        roleStore->getAssignedRoleNames(myPeerIdQString);
+
+    qDebug() << "rebuildRolesMenu: Definitions count:" << definitions.size()
+             << "My current roles:" << currentMyRoles;
+
+    // Lambda to be called when a role action is toggled
+    auto onRoleActionToggled = [rolesMenu, worker, myPeerIdStd, roleStore]() {
+        client::ClientMsg clientMsg;
+        client::p2p::SetPeerRolesCmd* cmd =
+            clientMsg.mutable_set_peer_roles_cmd();
+        cmd->set_target_peer_id(myPeerIdStd);
+
+        QList<QAction*> allMenuActions = rolesMenu->actions();
+        QVector<QString> newDesiredRoles;
+
+        for (QAction* action : allMenuActions) {
+            if (action->property("isRoleAction").toBool() &&
+                action->isChecked()) {
+                newDesiredRoles.append(action->property("roleName").toString());
+                cmd->add_assigned_role_names(
+                    action->property("roleName").toString().toStdString());
+            }
+        }
+
+        // Ensure "Viewer" is always present if it's a defined role and no other
+        // roles grant view. This is complex client-side logic; ideally, the
+        // server enforces baseline roles or the client simply sends its desired
+        // set and the server adjusts. For now, we send what the user checked.
+        // If newDesiredRoles is empty and "Viewer" exists, we might want to
+        // default to "Viewer". For simplicity here: if nothing is checked, an
+        // empty role list is sent. The server can decide.
+
+        // cmd->set_hlc_ts(...); // Client might set its HLC
+        qDebug() << "GUI: Requesting role change for self. New roles set:"
+                 << newDesiredRoles;
+        worker->send(clientMsg);
+    };
+
+    for (auto it = definitions.constBegin(); it != definitions.constEnd();
+         ++it) {
+        const QString roleName                        = it.key();
+        const client::p2p::RoleDefinition& definition = it.value();
+
+        QAction* roleAction = rolesMenu->addAction(roleName);
+        roleAction->setCheckable(true);
+        roleAction->setProperty("isRoleAction", true);
+        roleAction->setProperty("roleName", roleName);
+        qDebug() << "rebuildRolesMenu: Creating action for role:" << roleName
+                 << "IsCheckable:" << roleAction->isCheckable();
+
+        // Check if the user currently has this role
+        if (currentMyRoles.contains(roleName)) {
+            roleAction->setChecked(true);
+            qDebug() << "rebuildRolesMenu: Role" << roleName << "is CHECKED";
+        }
+
+        // Connect to toggled() signal, which is better for checkable actions
+        // than triggered(), as it fires *after* the check state has changed.
+        QObject::connect(roleAction, &QAction::toggled, window,
+                         onRoleActionToggled);
+    }
+
+    rolesMenu->addSeparator();
+    QAction* manageDefinitionsAction =
+        rolesMenu->addAction("Manage Role Definitions...");
+    manageDefinitionsAction->setEnabled(P2P::Roles::hasPermission(
+        roleStore->getPermissionsForPeer(myPeerIdQString),
+        P2P::Roles::PermAddRemoveRoles));
+    // TODO: Connect manageDefinitionsAction to a dialog
+    // TODO: Update manageDefinitionsAction->setEnabled state when local peer's
+    // permissions change
+}
+
+void createMenus(QMainWindow* window, P2P::Peer* peer,
+                 P2P::Roles::RoleStore* roleStore, QSplitter* mainSplitter,
+                 QWidget* rightPanel, QWidget* leftPanel,
+                 P2P::ControlStreamWorker* worker) {
     QMenuBar* menuBar = window->menuBar();
 
     // Session menu
@@ -63,7 +156,7 @@ void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,
     sessionMenu->addSeparator();
     QAction* quitAction = sessionMenu->addAction("Quit");
     QObject::connect(quitAction, &QAction::triggered, [peer, window]() {
-        peer->cleanup();
+        // peer->cleanup(); // cleanup is now part of QApplication::aboutToQuit
         window->close();
     });
 
@@ -169,40 +262,53 @@ void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,
     });
 
     // Roles menu
-    QMenu* rolesMenu      = menuBar->addMenu("Roles");
-    QAction* viewerAction = rolesMenu->addAction("Viewer");
-    QObject::connect(viewerAction, &QAction::triggered, [peer, window]() {
-        peer->roles = {P2P::Role::Viewer};
-        QMessageBox::information(window, "Role Changed",
-                                 "Your role has been changed to: Viewer");
-        if (gui::QueueButtonsRefreshCallback)
-            gui::QueueButtonsRefreshCallback();
-    });
-    QAction* streamerAction = rolesMenu->addAction("Streamer");
-    QObject::connect(streamerAction, &QAction::triggered, [peer, window]() {
-        peer->roles = {P2P::Role::Streamer};
-        QMessageBox::information(window, "Role Changed",
-                                 "Your role has been changed to: Streamer");
-        if (gui::QueueButtonsRefreshCallback)
-            gui::QueueButtonsRefreshCallback();
-    });
-    QAction* moderatorAction = rolesMenu->addAction("Moderator");
-    QObject::connect(moderatorAction, &QAction::triggered, [peer, window]() {
-        peer->roles = {P2P::Role::Moderator};
-        QMessageBox::information(window, "Role Changed",
-                                 "Your role has been changed to: Moderator");
-        if (gui::QueueButtonsRefreshCallback)
-            gui::QueueButtonsRefreshCallback();
-    });
+    QMenu* rolesMenu = menuBar->addMenu("Roles");
 
-    QAction* adminAction = rolesMenu->addAction("Admin");
-    QObject::connect(adminAction, &QAction::triggered, [peer, window]() {
-        peer->roles = {P2P::Role::Admin};
-        QMessageBox::information(window, "Role Changed",
-                                 "Your role has been changed to: Admin");
-        if (gui::QueueButtonsRefreshCallback)
-            gui::QueueButtonsRefreshCallback();
-    });
+    // For demonstration, we'll assume changing "own" roles is done via a
+    // command to the server. The actual `P2P::Peer* peer` object on the client
+    // is a dummy and its roles field isn't authoritative. The peer->peerId
+    // would be needed to identify "self" to the server. This part requires
+    // ControlStreamWorker to be passed to createMenus if commands are sent from
+    // here.
+
+    // Placeholder for local peer ID - this needs to be the actual ID known by
+    // the service
+    std::string myPeerIdStd = peer->peerId; // Using the dummy peer's ID for now
+
+    // Initial population
+    rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd, window);
+
+    // Connect to RoleStore signals to rebuild the menu when definitions or my
+    // assignments change
+    QObject::connect(
+        roleStore, &P2P::Roles::RoleStore::definitionsChanged, window,
+        [rolesMenu, roleStore, worker, myPeerIdStd, window]() {
+            qDebug() << "MENUS: definitionsChanged signal received. Rebuilding "
+                        "roles menu for myPeerId ("
+                     << QString::fromStdString(myPeerIdStd) << ").";
+            rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd, window);
+        });
+    QObject::connect(
+        roleStore, &P2P::Roles::RoleStore::peerRolesChanged, window,
+        [rolesMenu, roleStore, worker, myPeerIdStd,
+         window](const QString& changedPeerId) {
+            if (QString::fromStdString(myPeerIdStd) ==
+                changedPeerId) { // If my roles changed
+                qDebug()
+                    << "MENUS: peerRolesChanged signal received for myPeerId ("
+                    << changedPeerId << "). Rebuilding roles menu.";
+                rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd,
+                                 window);
+            }
+        });
+    QObject::connect(
+        roleStore, &P2P::Roles::RoleStore::allAssignmentsRefreshed, window,
+        [rolesMenu, roleStore, worker, myPeerIdStd, window]() {
+            qDebug() << "MENUS: allAssignmentsRefreshed signal received. "
+                        "Rebuilding roles menu for myPeerId ("
+                     << QString::fromStdString(myPeerIdStd) << ").";
+            rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd, window);
+        });
 
     // Help menu
     QMenu* helpMenu      = menuBar->addMenu("Help");

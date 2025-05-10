@@ -25,6 +25,7 @@ set(SOURCES
     client/player/mpv_manager.cpp
     client/transport/grpc_client.cpp
     client/transport/control_stream_worker.cpp
+    client/roles/role_store.cpp
 )
 
 set(HEADERS
@@ -39,6 +40,8 @@ set(HEADERS
     client/transport/grpc_client.h
     client/transport/control_stream_worker.h
     client/utils/net.h
+    client/roles/role_store.h
+    client/roles/permissions.h
 )
 
 # --- C++ gRPC/protobuf stub generation ---

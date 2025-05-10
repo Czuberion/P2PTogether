@@ -12,6 +12,8 @@
 #pragma once
 
 #include "p2p/peer.h"
+#include "roles/role_store.h"
+#include "transport/control_stream_worker.h"
 #include <QMainWindow>
 #include <QSplitter>
 #include <QWidget>
@@ -31,8 +33,10 @@ namespace gui {
  * \param rightPanel Pointer to the right panel widget (chat, queue, analytics).
  * \param leftPanel Pointer to the left panel widget (video playback).
  */
-void createMenus(QMainWindow* window, P2P::Peer* peer, QSplitter* mainSplitter,
-                 QWidget* rightPanel, QWidget* leftPanel);
+void createMenus(QMainWindow* window, P2P::Peer* peer,
+                 P2P::Roles::RoleStore* roleStore, QSplitter* mainSplitter,
+                 QWidget* rightPanel, QWidget* leftPanel,
+                 P2P::ControlStreamWorker* worker);
 
 /*!
  * \brief Callback function for toggling the sidebar visibility.

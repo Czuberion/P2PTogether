@@ -12,6 +12,7 @@
 #pragma once
 
 #include "p2p/peer.h"
+#include "roles/role_store.h"
 #include "transport/control_stream_worker.h"
 #include <QMainWindow>
 #include <QWidget>
@@ -34,9 +35,12 @@ extern std::function<void()> QueueButtonsRefreshCallback;
  *
  * \param peer Pointer to the P2P::Peer object representing the local user.
  * \param window Pointer to the main QMainWindow.
+ * \param worker Pointer to the ControlStreamWorker for sending gRPC messages.
+ * \param roleStore Pointer to the RoleStore for permission checks.
  * \return QWidget* The constructed right panel widget.
  */
 QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
-                          P2P::ControlStreamWorker* worker);
+                          P2P::ControlStreamWorker* worker,
+                          P2P::Roles::RoleStore* roleStore);
 
 } // namespace gui
