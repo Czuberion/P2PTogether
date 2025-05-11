@@ -88,6 +88,7 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     // Queue header
     QWidget* queueHeaderWidget     = new QWidget();
     QHBoxLayout* queueHeaderLayout = new QHBoxLayout(queueHeaderWidget);
+    queueHeaderLayout->setContentsMargins(0, 4, 0, 4);
     queueHeaderWidget->setLayout(queueHeaderLayout);
     QLabel* queueLabel = new QLabel("Video Queue");
     queueLabel->setAlignment(Qt::AlignCenter);
@@ -95,6 +96,12 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     toggleQueueBtn->setFixedSize(40, 40);
     toggleQueueBtn->setStyleSheet("font-size: 20px; text-align: center;");
     toggleQueueBtn->setToolTip("Toggle queue visibility");
+    queueHeaderWidget->setSizePolicy(QSizePolicy::Expanding,
+                                     QSizePolicy::Preferred);
+    const int minH = toggleQueueBtn->height() +
+                     queueHeaderLayout->contentsMargins().top() +
+                     queueHeaderLayout->contentsMargins().bottom();
+    queueHeaderWidget->setMinimumHeight(minH);
     queueHeaderLayout->addWidget(queueLabel, 1);
     queueHeaderLayout->addWidget(toggleQueueBtn, 0);
 
@@ -102,21 +109,22 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     QListWidget* queueList = new QListWidget();
     queueList->setMinimumHeight(100);
 
-    // Queue buttons (visible only when we have Queue permission)
+    // Queue buttons
     QWidget* queueButtonsWidget     = new QWidget();
     QHBoxLayout* queueButtonsLayout = new QHBoxLayout(queueButtonsWidget);
     queueButtonsWidget->setLayout(queueButtonsLayout);
 
-    // Queue buttons and list visibility
-    static bool queueVisible           = true;
-    auto refreshQueueButtonsVisibility = [roleStore, queueButtonsWidget]() {
-        const QString me = roleStore->getLocalPeerId(); // ← real ID once known
-        const bool canQueue =
-            (roleStore->getPermissionsForPeer(me) & P2P::Roles::PermQueue) != 0;
-        queueButtonsWidget->setVisible(canQueue && queueVisible);
-    };
-    QueueButtonsRefreshCallback = refreshQueueButtonsVisibility;
+    // Sub‑widget that contains add / remove / clear
+    // (visible only when we have Queue permission)
+    QWidget* manipButtonsWidget     = new QWidget(queueButtonsWidget);
+    QHBoxLayout* manipButtonsLayout = new QHBoxLayout(manipButtonsWidget);
+    manipButtonsLayout->setContentsMargins(0, 0, 0, 0);
+    manipButtonsWidget->setLayout(manipButtonsLayout);
 
+    // Queue visibility flag
+    static bool queueVisible = true;
+
+    // queue‑manipulation buttons (gated by PermQueue)
     QPushButton* addBtn = new QPushButton("+");
     addBtn->setFixedSize(40, 40);
     addBtn->setStyleSheet("font-size: 20px; text-align: center;");
@@ -134,11 +142,36 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     clearBtn->setToolTip("Clear the queue");
     clearBtn->setEnabled(queueList->count() > 0);
 
+    // Info button (visible for all)
+    QPushButton* infoBtn = new QPushButton("🛈");
+    infoBtn->setFixedSize(40, 40);
+    infoBtn->setStyleSheet("font-size: 20px; text-align: center;");
+    infoBtn->setToolTip("Show information about the selected item");
+    infoBtn->setEnabled(queueList->count() > 0);
+
+    manipButtonsLayout->addWidget(addBtn);
+    manipButtonsLayout->addWidget(removeBtn);
+    manipButtonsLayout->addWidget(clearBtn);
+
     queueButtonsLayout->addStretch();
-    queueButtonsLayout->addWidget(addBtn);
-    queueButtonsLayout->addWidget(removeBtn);
-    queueButtonsLayout->addWidget(clearBtn);
+    queueButtonsLayout->addWidget(manipButtonsWidget);
+    queueButtonsLayout->addWidget(infoBtn);
     queueButtonsLayout->addStretch();
+
+    // Visibility refresh lambda (now that every widget exists)
+    auto refreshQueueButtonsVisibility = [roleStore, manipButtonsWidget,
+                                          infoBtn, queueList]() {
+        const QString me = roleStore->getLocalPeerId();
+        const bool canQueue =
+            (roleStore->getPermissionsForPeer(me) & P2P::Roles::PermQueue) != 0;
+
+        manipButtonsWidget->setVisible(canQueue && queueVisible);
+
+        const bool infoEnabled = queueVisible && queueList->currentRow() >= 0;
+        infoBtn->setEnabled(infoEnabled);
+        infoBtn->setVisible(queueVisible);
+    };
+    QueueButtonsRefreshCallback = refreshQueueButtonsVisibility;
     refreshQueueButtonsVisibility();
 
     // Connect to RoleStore signals to refresh button visibility when
@@ -169,17 +202,21 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
                 if (msg.payload_case() == client::ServerMsg::kQueueUpdate) {
                     qDebug() << "GUI: Received QueueUpdate";
                     const client::p2p::QueueUpdate& update = msg.queue_update();
-                    queueList->clear(); // Clear existing items
+                    queueList->clear();
                     for (const auto& item : update.items()) {
-                        // Displaying only file_path for simplicity.
-                        // You might want to format this string to show
-                        // StoredBy, AddedBy etc. e.g., QString display_text =
-                        // QString::fromStdString(item.file_path()) +
-                        //                              " (by " +
-                        //                              QString::fromStdString(item.added_by())
-                        //                              + ")";
-                        queueList->addItem(
-                            QString::fromStdString(item.file_path()));
+                        const QString fullPath =
+                            QString::fromStdString(item.file_path());
+                        const QString fileName = QFileInfo(fullPath).fileName();
+
+                        auto* listIt = new QListWidgetItem(fileName);
+                        listIt->setData(Qt::UserRole, fullPath);
+                        listIt->setData(
+                            Qt::UserRole + 1,
+                            QString::fromStdString(item.stored_by()));
+                        listIt->setData(
+                            Qt::UserRole + 2,
+                            QString::fromStdString(item.added_by()));
+                        queueList->addItem(listIt);
                     }
                     // Update clear button state after list is potentially
                     // modified
@@ -203,10 +240,11 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
                          } else {
                              queueList->hide();
                              toggleQueueBtn->setText("▲");
-                             // Calculate minimum height needed for the header +
-                             // layout margins
+                             // Use the header’s minimumHeight (which already
+                             // includes your contentsMargins) so you don’t
+                             // accidentally chop off a few px...
                              int headerHeight =
-                                 queueHeaderWidget->sizeHint().height();
+                                 queueHeaderWidget->minimumHeight();
                              int topMargin, bottomMargin;
                              queueWidget->layout()->getContentsMargins(
                                  nullptr, &topMargin, nullptr, &bottomMargin);
@@ -276,7 +314,41 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     });
 
     QObject::connect(queueList, &QListWidget::currentRowChanged,
-                     [removeBtn](int row) { removeBtn->setEnabled(row >= 0); });
+                     [removeBtn, infoBtn](int row) {
+                         const bool valid = row >= 0;
+                         removeBtn->setEnabled(valid);
+                         infoBtn->setEnabled(valid);
+                     });
+
+    // Info-button behaviour
+    QObject::connect(infoBtn, &QPushButton::clicked, [queueList, window]() {
+        int row = queueList->currentRow();
+        if (row < 0)
+            return;
+
+        QListWidgetItem* it    = queueList->item(row);
+        const QString filePath = it->data(Qt::UserRole).toString();
+        const QString storedBy = it->data(Qt::UserRole + 1).toString();
+        const QString addedBy  = it->data(Qt::UserRole + 2).toString();
+        const QString fileName = QFileInfo(filePath).fileName();
+
+        QDialog dlg(window);
+        dlg.setWindowTitle(QString("Queue Item - %1").arg(fileName));
+
+        QFormLayout form(&dlg);
+        form.addRow("File path:", new QLabel(filePath));
+        form.addRow("Stored by:",
+                    new QLabel(storedBy.isEmpty() ? "‑" : storedBy));
+        form.addRow("Requested by:",
+                    new QLabel(addedBy.isEmpty() ? "‑" : addedBy));
+
+        QDialogButtonBox box(QDialogButtonBox::Ok, &dlg);
+        form.addRow(&box);
+        QObject::connect(&box, &QDialogButtonBox::accepted, &dlg,
+                         &QDialog::accept);
+
+        dlg.exec();
+    });
 
     queueLayout->addWidget(queueHeaderWidget);
     queueLayout->addWidget(queueList);
