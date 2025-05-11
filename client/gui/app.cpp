@@ -53,6 +53,10 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
     // --- Instantiate RoleStore ---
     P2P::Roles::RoleStore roleStore;
 
+    // --- Placeholder for our actual Peer ID, to be received from service ---
+    // The 'peer' object passed to runGUI is mostly a dummy for roles for now.
+    // We'll update its peerId field when we get the LocalPeerIdentity.
+
     // --- Main Window Setup ---
     QMainWindow window;
     window.setWindowTitle("P2PTogether");
@@ -72,36 +76,48 @@ int runGUI(P2P::Peer* peer, quint16 grpcPort) {
 
     // --- Connect ControlStreamWorker::serverMsg to RoleStore and other
     // handlers ---
-    QObject::connect(worker, &P2P::ControlStreamWorker::serverMsg, &window,
-                     [&roleStore](const client::ServerMsg& msg) {
-                         qDebug() << "[control‑stream] received payload type"
-                                  << msg.payload_case();
-                         // Delegate to RoleStore for role-related messages
-                         switch (msg.payload_case()) {
-                         case client::ServerMsg::kRoleDefinitionsUpdate:
-                             // Use QMetaObject::invokeMethod if roleStore might
-                             // be in a different thread or if its methods are
-                             // not reentrant and worker is on another thread.
-                             // For now, assuming direct call is okay if signals
-                             // are queued or same thread. QueuedConnection on
-                             // the original connect() helps here.
-                             roleStore.processRoleDefinitionsUpdate(
-                                 msg.role_definitions_update());
-                             break;
-                         case client::ServerMsg::kPeerRoleAssignment:
-                             roleStore.processPeerRoleAssignment(
-                                 msg.peer_role_assignment());
-                             break;
-                         case client::ServerMsg::kAllPeerRoleAssignments:
-                             roleStore.processAllPeerAssignments(
-                                 msg.all_peer_role_assignments());
-                             break;
-                         // TODO: Add cases for kQueueUpdate to update
-                         // QListWidget (as done previously) and other ServerMsg
-                         // types.
-                         default: break;
-                         }
-                     });
+    QObject::connect(
+        worker, &P2P::ControlStreamWorker::serverMsg, &window,
+        [&roleStore, peer](const client::ServerMsg& msg) {
+            qDebug() << "[control‑stream] received payload type"
+                     << msg.payload_case();
+            // Delegate to RoleStore for role-related messages
+            switch (msg.payload_case()) {
+            case client::ServerMsg::kRoleDefinitionsUpdate:
+                // Use QMetaObject::invokeMethod if roleStore might
+                // be in a different thread or if its methods are
+                // not reentrant and worker is on another thread.
+                // For now, assuming direct call is okay if signals
+                // are queued or same thread. QueuedConnection on
+                // the original connect() helps here.
+                roleStore.processRoleDefinitionsUpdate(
+                    msg.role_definitions_update());
+                break;
+            case client::ServerMsg::kPeerRoleAssignment:
+                roleStore.processPeerRoleAssignment(msg.peer_role_assignment());
+                break;
+            case client::ServerMsg::kAllPeerRoleAssignments:
+                roleStore.processAllPeerAssignments(
+                    msg.all_peer_role_assignments());
+                break;
+            case client::ServerMsg::kLocalPeerIdentity:
+                roleStore.setLocalPeerId(QString::fromStdString(
+                    msg.local_peer_identity().peer_id()));
+                // The dummy 'peer' object is less important now for ID.
+                // RoleStore holds the true one.
+                qInfo() << "GUI: Received LocalPeerIdentity, my ID is now:"
+                        << roleStore.getLocalPeerId();
+                // TODO: May need to trigger UI updates that depend on knowing
+                // the true local peer ID. For example, refresh role menus or
+                // permission-gated elements if they were initialized before
+                // this ID was known. Or connect to a new signal from P2P::Peer.
+                break;
+            // TODO: Add cases for kQueueUpdate to update
+            // QListWidget (as done previously) and other ServerMsg
+            // types.
+            default: break;
+            }
+        });
 
     worker->moveToThread(netThread);
 

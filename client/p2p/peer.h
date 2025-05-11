@@ -22,12 +22,16 @@ enum class Role { Viewer, Streamer, Moderator, Admin };
 
 class Peer {
 public:
-    const std::string peerId;
+    std::string peerId;
+    bool isIdentityConfirmed;
 
     Peer();
     Peer(const std::string& peerId);
 
     bool hasRole(Role role) const;
+    void setTruePeerId(const std::string& trueId);
+    std::string getPeerId() const;
+
     void cleanup();
     bool startStreaming(const std::string& filePath);
 

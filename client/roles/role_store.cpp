@@ -21,22 +21,32 @@ RoleStore::~RoleStore() {}
 
 void RoleStore::processRoleDefinitionsUpdate(
     const client::p2p::RoleDefinitionsUpdate& update) {
-    QWriteLocker locker(&storeLock);
-    roleDefinitions.clear();
-    for (const auto& defProto : update.definitions()) {
-        if (defProto.name().empty()) {
-            qWarning() << "RoleStore: Received role definition with empty "
-                          "name. Skipping.";
-            continue;
+    int newSize = 0;
+    {
+        QWriteLocker locker(&storeLock);
+        roleDefinitions.clear();
+        for (const auto& defProto : update.definitions()) {
+            if (defProto.name().empty()) {
+                qWarning() << "RoleStore: Received role definition with empty "
+                              "name. Skipping.";
+                continue;
+            }
+            // keep original spelling for display, but use a lower‑case key for
+            // look‑ups
+            const QString key =
+                QString::fromStdString(defProto.name()).toLower();
+            roleDefinitions.insert(key, defProto);
         }
-        // Normalize role name for consistent lookup, e.g., toLower()
-        // For now, assuming names from server are canonical.
-        roleDefinitions.insert(QString::fromStdString(defProto.name()),
-                               defProto);
+        newSize = roleDefinitions.size();
     }
-    locker.unlock(); // Unlock before emitting signal
+    // No direct data from the update is passed in signals, so emitting after
+    // lock is fine. The boolean 'changed' isn't strictly needed here as we
+    // always clear and repopulate. We assume if this method is called, it's a
+    // valid update warranting signals.
     qInfo() << "RoleStore: Processed RoleDefinitionsUpdate. Total definitions:"
-            << roleDefinitions.size();
+            << newSize;
+    qDebug()
+        << "RoleStore: Emitting definitionsChanged and allAssignmentsRefreshed";
     emit definitionsChanged();
     emit allAssignmentsRefreshed(); // Definitions changing can affect all
                                     // permissions
@@ -52,34 +62,33 @@ void RoleStore::processPeerRoleAssignment(
     }
 
     bool changed = false;
-    QWriteLocker locker(&storeLock);
+    {
+        QWriteLocker locker(&storeLock);
 
-    // HLC Check: Only update if incoming is newer or if no current assignment
-    // exists
-    auto it = peerAssignments.find(peerId);
-    if (it == peerAssignments.end() ||
-        assignment.hlc_ts() > it.value().hlc_ts()) {
-        if (assignment.assigned_role_names_size() > 0) {
-            peerAssignments.insert(peerId, assignment);
-        } else {
-            // If new assignment has no roles, remove the peer's assignment
-            // entry
-            if (it != peerAssignments.end()) {
-                peerAssignments.erase(it);
+        auto it = peerAssignments.find(peerId);
+        if (it == peerAssignments.end() ||
+            assignment.hlc_ts() > it.value().hlc_ts()) {
+            if (assignment.assigned_role_names_size() > 0) {
+                peerAssignments.insert(peerId, assignment);
+            } else {
+                if (it != peerAssignments.end()) {
+                    peerAssignments.erase(it);
+                }
             }
+            changed = true;
+            qInfo() << "RoleStore: Processed PeerRoleAssignment for peer"
+                    << peerId << "New HLC:" << assignment.hlc_ts();
+        } else {
+            qInfo() << "RoleStore: Skipped stale PeerRoleAssignment for peer"
+                    << peerId << "Incoming HLC:" << assignment.hlc_ts()
+                    << "Existing HLC:"
+                    << (it != peerAssignments.end() ? it.value().hlc_ts() : -1);
         }
-        changed = true;
-        qInfo() << "RoleStore: Processed PeerRoleAssignment for peer" << peerId
-                << "New HLC:" << assignment.hlc_ts();
-    } else {
-        qInfo() << "RoleStore: Skipped stale PeerRoleAssignment for peer"
-                << peerId << "Incoming HLC:" << assignment.hlc_ts()
-                << "Existing HLC:"
-                << (it != peerAssignments.end() ? it.value().hlc_ts() : -1);
     }
+    // locker goes out of scope here
 
-    locker.unlock(); // Unlock before emitting signal
     if (changed) {
+        qDebug() << "RoleStore: Emitting peerRolesChanged for" << peerId;
         emit peerRolesChanged(peerId);
     }
 }
@@ -125,6 +134,7 @@ void RoleStore::processAllPeerAssignments(
     }
     qInfo() << "RoleStore: Finished processing AllPeerAssignments snapshot.";
     // After all individual assignments are processed:
+    qDebug() << "RoleStore: Emitting allAssignmentsRefreshed";
     emit
     allAssignmentsRefreshed(); // Signal that a bulk update may have occurred
 }
@@ -140,10 +150,11 @@ RoleStore::getRoleDefinition(const QString& roleName, bool* ok) const {
     QReadLocker locker(&storeLock);
     // Consider normalizing roleName (e.g., toLower()) if keys are stored
     // normalized
-    if (roleDefinitions.contains(roleName)) {
+    const QString key = roleName.toLower();
+    if (roleDefinitions.contains(key)) {
         if (ok)
             *ok = true;
-        return roleDefinitions.value(roleName); // Returns a copy
+        return roleDefinitions.value(key);
     }
     if (ok)
         *ok = false;
@@ -187,17 +198,38 @@ quint32 RoleStore::getPermissionsForPeer(const QString& peerId) const {
     const auto& assignmentProto = it.value();
     for (const std::string& roleNameStd :
          assignmentProto.assigned_role_names()) {
-        QString roleName = QString::fromStdString(roleNameStd);
-        // Consider normalizing roleName if keys in roleDefinitions are
-        // normalized
-        if (roleDefinitions.contains(roleName)) {
-            finalPermissions |= roleDefinitions.value(roleName).permissions();
+        const QString key = QString::fromStdString(roleNameStd).toLower();
+        if (roleDefinitions.contains(key)) {
+            finalPermissions |= roleDefinitions.value(key).permissions();
         } else {
             qWarning() << "RoleStore: Peer" << peerId
-                       << "is assigned unknown role:" << roleName;
+                       << "is assigned unknown role:" << roleNameStd;
         }
     }
     return finalPermissions;
+}
+
+void RoleStore::setLocalPeerId(const QString& peerId) {
+    bool changed = false;
+    QString newIdVal; // To emit the correct value after unlock
+    {                 // Scope for the locker
+        QWriteLocker locker(&storeLock);
+        if (this->localPeerId != peerId) {
+            this->localPeerId = peerId;
+            newIdVal          = this->localPeerId; // Store for emitting
+            changed           = true;
+            qInfo() << "RoleStore: Local Peer ID set to:" << this->localPeerId;
+        }
+    } // locker goes out of scope and releases the lock here
+
+    if (changed) {
+        emit localPeerIdConfirmed(newIdVal);
+    }
+}
+
+QString RoleStore::getLocalPeerId() const {
+    QReadLocker locker(&storeLock);
+    return localPeerId;
 }
 
 } // namespace Roles

@@ -37,6 +37,10 @@ public:
     client::p2p::RoleDefinition getRoleDefinition(const QString& roleName,
                                                   bool* ok = nullptr) const;
 
+    // Method to set the local peer's ID once received from the server
+    void setLocalPeerId(const QString& peerId);
+    // To be used by GUI components
+    QString getLocalPeerId() const;
     // Gets assigned role names for a peer
     QVector<QString> getAssignedRoleNames(const QString& peerId) const;
     // Gets the HLC timestamp of a peer's last role assignment
@@ -52,6 +56,8 @@ signals:
         const QString& peerId); // Emitted when a specific peer's roles change
     void allAssignmentsRefreshed(); // Emitted after processing
                                     // AllPeerRoleAssignments
+    void localPeerIdConfirmed(
+        const QString& peerId); // Emitted when the local peer ID is set
 
 private:
     // Internal storage
@@ -63,6 +69,9 @@ private:
     // Value: The PeerRoleAssignment protobuf message, which contains the list
     // of role names and its HLC
     QMap<QString, client::p2p::PeerRoleAssignment> peerAssignments;
+
+    // Store the true local peer ID
+    QString localPeerId;
 
     // Mutex for thread-safe access to the internal maps.
     // QReadWriteLock is good if reads are much more frequent than writes.

@@ -28,11 +28,15 @@ std::function<void()> SidebarToggleCallback;
 // This needs access to rolesMenu, roleStore, worker, and myPeerIdStd
 static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
                              P2P::ControlStreamWorker* worker,
-                             const std::string& myPeerIdStd,
                              QMainWindow* window) {
+    // Get the local peer ID from RoleStore
+    QString myPeerIdQString = roleStore->getLocalPeerId();
+    // If it's not set yet (e.g., initial call before LocalPeerIdentity
+    // received), we might pass a temporary/dummy or disable certain actions.
+    // For now, proceed if empty.
+
     if (!rolesMenu || !roleStore || !worker)
         return;
-    QString myPeerIdQString = QString::fromStdString(myPeerIdStd);
 
     qDebug() << "rebuildRolesMenu: Rebuilding for peer:" << myPeerIdQString;
 
@@ -40,18 +44,35 @@ static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
 
     QMap<QString, client::p2p::RoleDefinition> definitions =
         roleStore->getRoleDefinitions();
-    QVector<QString> currentMyRoles =
-        roleStore->getAssignedRoleNames(myPeerIdQString);
+    // QVector<QString> currentMyRoles;
+    QVector<QString> currentMyRolesLower;
+    if (!myPeerIdQString.isEmpty()) {
+        // currentMyRoles = roleStore->getAssignedRoleNames(myPeerIdQString);
+        for (const auto& r : roleStore->getAssignedRoleNames(myPeerIdQString))
+            currentMyRolesLower.push_back(r.toLower());
+    }
 
     qDebug() << "rebuildRolesMenu: Definitions count:" << definitions.size()
-             << "My current roles:" << currentMyRoles;
+             << "My current roles:" << currentMyRolesLower;
 
-    // Lambda to be called when a role action is toggled
-    auto onRoleActionToggled = [rolesMenu, worker, myPeerIdStd, roleStore]() {
+    // Who may toggle?
+    const bool canManageOwnRoles =
+        !myPeerIdQString.isEmpty() &&
+        P2P::Roles::hasPermission(
+            roleStore->getPermissionsForPeer(myPeerIdQString),
+            P2P::Roles::PermManageUserRoles);
+
+    // Lambda sent with every QAction (only fires if the action is enabled)
+    auto onRoleActionToggled = [rolesMenu, worker, myPeerIdQString,
+                                roleStore]() {
+        if (myPeerIdQString.isEmpty()) {
+            qWarning() << "GUI: Cannot set roles, local peer ID not yet known.";
+            return;
+        }
         client::ClientMsg clientMsg;
         client::p2p::SetPeerRolesCmd* cmd =
             clientMsg.mutable_set_peer_roles_cmd();
-        cmd->set_target_peer_id(myPeerIdStd);
+        cmd->set_target_peer_id(myPeerIdQString.toStdString());
 
         QList<QAction*> allMenuActions = rolesMenu->actions();
         QVector<QString> newDesiredRoles;
@@ -59,9 +80,9 @@ static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
         for (QAction* action : allMenuActions) {
             if (action->property("isRoleAction").toBool() &&
                 action->isChecked()) {
-                newDesiredRoles.append(action->property("roleName").toString());
-                cmd->add_assigned_role_names(
-                    action->property("roleName").toString().toStdString());
+                const QString key = action->property("roleKey").toString();
+                newDesiredRoles.append(key);
+                cmd->add_assigned_role_names(key.toStdString());
             }
         }
 
@@ -81,34 +102,43 @@ static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
 
     for (auto it = definitions.constBegin(); it != definitions.constEnd();
          ++it) {
-        const QString roleName                        = it.key();
-        const client::p2p::RoleDefinition& definition = it.value();
+        const QString roleKey     = it.key();
+        const auto& definition    = it.value();
+        const QString displayName = QString::fromStdString(definition.name());
 
-        QAction* roleAction = rolesMenu->addAction(roleName);
+        QAction* roleAction = rolesMenu->addAction(displayName);
         roleAction->setCheckable(true);
         roleAction->setProperty("isRoleAction", true);
-        roleAction->setProperty("roleName", roleName);
-        qDebug() << "rebuildRolesMenu: Creating action for role:" << roleName
-                 << "IsCheckable:" << roleAction->isCheckable();
+        roleAction->setProperty("roleKey", roleKey);
+        roleAction->setEnabled(canManageOwnRoles);
+
+        qDebug() << "rebuildRolesMenu: Creating action for role:" << displayName
+                 << "IsCheckable:" << roleAction->isCheckable()
+                 << "IsRoleAction:" << roleAction->property("isRoleAction")
+                 << "RoleKey:" << roleAction->property("roleKey");
 
         // Check if the user currently has this role
-        if (currentMyRoles.contains(roleName)) {
+        if (currentMyRolesLower.contains(roleKey)) {
             roleAction->setChecked(true);
-            qDebug() << "rebuildRolesMenu: Role" << roleName << "is CHECKED";
+            qDebug() << "rebuildRolesMenu: Role" << displayName << "is CHECKED";
         }
 
         // Connect to toggled() signal, which is better for checkable actions
         // than triggered(), as it fires *after* the check state has changed.
-        QObject::connect(roleAction, &QAction::toggled, window,
-                         onRoleActionToggled);
+        if (canManageOwnRoles)
+            QObject::connect(roleAction, &QAction::toggled, window,
+                             onRoleActionToggled);
     }
 
     rolesMenu->addSeparator();
     QAction* manageDefinitionsAction =
         rolesMenu->addAction("Manage Role Definitions...");
-    manageDefinitionsAction->setEnabled(P2P::Roles::hasPermission(
-        roleStore->getPermissionsForPeer(myPeerIdQString),
-        P2P::Roles::PermAddRemoveRoles));
+    const bool canManageDefs =
+        !myPeerIdQString.isEmpty() &&
+        P2P::Roles::hasPermission(
+            roleStore->getPermissionsForPeer(myPeerIdQString),
+            P2P::Roles::PermAddRemoveRoles);
+    manageDefinitionsAction->setEnabled(canManageDefs);
     // TODO: Connect manageDefinitionsAction to a dialog
     // TODO: Update manageDefinitionsAction->setEnabled state when local peer's
     // permissions change
@@ -273,41 +303,51 @@ void createMenus(QMainWindow* window, P2P::Peer* peer,
 
     // Placeholder for local peer ID - this needs to be the actual ID known by
     // the service
-    std::string myPeerIdStd = peer->peerId; // Using the dummy peer's ID for now
 
     // Initial population
-    rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd, window);
+    rebuildRolesMenu(rolesMenu, roleStore, worker, window);
+    // rebuildRolesMenu(rolesMenu, roleStore, worker, "" /* dummy, rebuild uses
+    // roleStore->getLocalPeerId() */, window);
 
     // Connect to RoleStore signals to rebuild the menu when definitions or my
     // assignments change
-    QObject::connect(
-        roleStore, &P2P::Roles::RoleStore::definitionsChanged, window,
-        [rolesMenu, roleStore, worker, myPeerIdStd, window]() {
-            qDebug() << "MENUS: definitionsChanged signal received. Rebuilding "
-                        "roles menu for myPeerId ("
-                     << QString::fromStdString(myPeerIdStd) << ").";
-            rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd, window);
-        });
+    QObject::connect(roleStore, &P2P::Roles::RoleStore::definitionsChanged,
+                     window, [rolesMenu, roleStore, worker, window]() {
+                         qDebug()
+                             << "MENUS: definitionsChanged signal received. "
+                                "Rebuilding roles menu for local peer ("
+                             << roleStore->getLocalPeerId() << ").";
+                         rebuildRolesMenu(rolesMenu, roleStore, worker, window);
+                     });
+
     QObject::connect(
         roleStore, &P2P::Roles::RoleStore::peerRolesChanged, window,
-        [rolesMenu, roleStore, worker, myPeerIdStd,
-         window](const QString& changedPeerId) {
-            if (QString::fromStdString(myPeerIdStd) ==
-                changedPeerId) { // If my roles changed
+        [rolesMenu, roleStore, worker, window](const QString& changedPeerId) {
+            QString localPeerId = roleStore->getLocalPeerId();
+            if (localPeerId == changedPeerId && !localPeerId.isEmpty()) {
                 qDebug()
                     << "MENUS: peerRolesChanged signal received for myPeerId ("
                     << changedPeerId << "). Rebuilding roles menu.";
-                rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd,
-                                 window);
+                rebuildRolesMenu(rolesMenu, roleStore, worker, window);
             }
         });
+
     QObject::connect(
         roleStore, &P2P::Roles::RoleStore::allAssignmentsRefreshed, window,
-        [rolesMenu, roleStore, worker, myPeerIdStd, window]() {
+        [rolesMenu, roleStore, worker, window]() {
             qDebug() << "MENUS: allAssignmentsRefreshed signal received. "
-                        "Rebuilding roles menu for myPeerId ("
-                     << QString::fromStdString(myPeerIdStd) << ").";
-            rebuildRolesMenu(rolesMenu, roleStore, worker, myPeerIdStd, window);
+                        "Rebuilding roles menu for local peer ("
+                     << roleStore->getLocalPeerId() << ").";
+            rebuildRolesMenu(rolesMenu, roleStore, worker, window);
+        });
+
+    QObject::connect(
+        roleStore, &P2P::Roles::RoleStore::localPeerIdConfirmed, window,
+        [rolesMenu, roleStore, worker, window](const QString& /*localId*/) {
+            qDebug() << "MENUS: localPeerIdConfirmed signal received. "
+                        "Rebuilding roles menu for local peer ("
+                     << roleStore->getLocalPeerId() << ").";
+            rebuildRolesMenu(rolesMenu, roleStore, worker, window);
         });
 
     // Help menu

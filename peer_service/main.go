@@ -62,6 +62,14 @@ func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientp
 func (s *server) sendInitialState(stream clientpb.P2PTClient_ControlStreamServer) {
 	// 1. Send Role Definitions
 	defs := s.roleManager.GetDefinitions()
+
+	// Send Local Peer Identity first (or as part of initial state)
+	identityMsg := &clientpb.LocalPeerIdentity{PeerId: s.node.ID().String()}
+	if err := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_LocalPeerIdentity{LocalPeerIdentity: identityMsg}}); err != nil {
+		log.Printf("Error sending LocalPeerIdentity to client for node %s: %v", s.node.ID(), err)
+		// Decide if this is a fatal error for the stream
+	}
+
 	pbDefs := make([]*p2ppb.RoleDefinition, 0, len(defs))
 	for _, d := range defs {
 		pbDefs = append(pbDefs, &p2ppb.RoleDefinition{Name: d.Name, Permissions: uint32(d.Permissions)})

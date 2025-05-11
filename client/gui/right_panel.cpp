@@ -108,16 +108,12 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
     queueButtonsWidget->setLayout(queueButtonsLayout);
 
     // Queue buttons and list visibility
-    static bool queueVisible = true;
-    QString myPeerIdQString =
-        QString::fromStdString(peer->peerId); // Use dummy peer's ID for now
-
-    auto refreshQueueButtonsVisibility = [myPeerIdQString, roleStore,
-                                          queueButtonsWidget]() {
-        queueButtonsWidget->setVisible(
-            (roleStore->getPermissionsForPeer(myPeerIdQString) &
-             P2P::Roles::PermQueue) != 0 &&
-            queueVisible);
+    static bool queueVisible           = true;
+    auto refreshQueueButtonsVisibility = [roleStore, queueButtonsWidget]() {
+        const QString me = roleStore->getLocalPeerId(); // ← real ID once known
+        const bool canQueue =
+            (roleStore->getPermissionsForPeer(me) & P2P::Roles::PermQueue) != 0;
+        queueButtonsWidget->setVisible(canQueue && queueVisible);
     };
     QueueButtonsRefreshCallback = refreshQueueButtonsVisibility;
 
@@ -147,18 +143,23 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
 
     // Connect to RoleStore signals to refresh button visibility when
     // roles/permissions change
-    QObject::connect(
-        roleStore, &P2P::Roles::RoleStore::peerRolesChanged, queueButtonsWidget,
-        [myPeerIdQString,
-         refreshQueueButtonsVisibility](const QString& changedPeerId) {
-            if (changedPeerId == myPeerIdQString) { // If my roles changed
-                refreshQueueButtonsVisibility();
-            }
-        });
+    QObject::connect(roleStore, &P2P::Roles::RoleStore::peerRolesChanged,
+                     queueButtonsWidget,
+                     [refreshQueueButtonsVisibility](const QString&) {
+                         refreshQueueButtonsVisibility();
+                     });
+
     QObject::connect(roleStore, &P2P::Roles::RoleStore::definitionsChanged,
                      queueButtonsWidget, refreshQueueButtonsVisibility);
+
     QObject::connect(roleStore, &P2P::Roles::RoleStore::allAssignmentsRefreshed,
                      queueButtonsWidget, refreshQueueButtonsVisibility);
+
+    QObject::connect(roleStore, &P2P::Roles::RoleStore::localPeerIdConfirmed,
+                     queueButtonsWidget,
+                     [refreshQueueButtonsVisibility](const QString&) {
+                         refreshQueueButtonsVisibility();
+                     });
 
     // Connect to the worker's serverMsg signal to handle QueueUpdates
     if (worker) {
