@@ -425,6 +425,112 @@ func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, 
 	}
 }
 
+// processSegmentEvents listens for new segments from the local RingBuffer (written by ffmpeg via IngestHandler),
+// checks if this node is the designated streamer, and if so, publishes the segment via GossipSub.
+func (s *server) processSegmentEvents(ctx context.Context, rb *media.RingBuffer) {
+	log.Println("[SegmentProcessor] Starting segment event processor...")
+	eventChan := rb.GetSegmentEventChannel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[SegmentProcessor] Context cancelled, stopping segment event processor.")
+			return
+		case event := <-eventChan:
+			// This node's ffmpeg produced a segment and it landed in the RingBuffer.
+			// Decision Q2: "Only owner peer runs ffmpeg locally" implies this node IS the streamer.
+			// We still do a sanity check against roles and queue state.
+			isDesignatedStreamer := false
+			headItem, headOk := s.queueCtrl.Q().Head()
+			if headOk {
+				localPeerID := s.node.ID()
+				permissions := s.roleManager.GetPermissionsForPeer(localPeerID)
+				if headItem.StoredBy == localPeerID && permissions.Has(roles.PermStream) {
+					// Optional: More detailed check if event.Seq aligns with expected sequence for headItem
+					// and if headItem.FilePath matches the one EncoderRunner is using.
+					isDesignatedStreamer = true
+				}
+			}
+
+			if !isDesignatedStreamer {
+				log.Printf("[SegmentProcessor] Segment %d from local RingBuffer, but node (%s) is not designated streamer. NOT publishing.", event.Seq, s.node.ID())
+				continue
+			}
+
+			segmentData := rb.Get(event.Seq) // Retrieve segment data from RingBuffer
+			if segmentData == nil {
+				log.Printf("[SegmentProcessor] Segment %d not found in RingBuffer after event. Skipping publish.", event.Seq)
+				continue
+			}
+
+			videoMsg := &p2ppb.VideoSegmentGossip{ // Use the p2ppb alias
+				SequenceNumber: event.Seq,
+				Data:           segmentData,
+			}
+			marshalledVideoMsg, err := proto.Marshal(videoMsg)
+			if err != nil {
+				log.Printf("[gossip VideoPublish] Failed to marshal VideoSegmentGossip for seq %d: %v", event.Seq, err)
+				continue
+			}
+
+			if videoTopic := s.node.VideoTopic(); videoTopic != nil {
+				if err := videoTopic.Publish(context.Background(), marshalledVideoMsg); err != nil { // Using context.Background for publish from this long-running goroutine
+					log.Printf("[gossip VideoPublish] Failed to publish video segment %d: %v", event.Seq, err)
+				} else {
+					log.Printf("[gossip VideoPublish] Published video segment %d (%d bytes) via event processor", event.Seq, len(segmentData))
+					s.node.AddBytesUp(uint64(len(marshalledVideoMsg)))
+				}
+			}
+		}
+	}
+}
+
+func (s *server) processVideoSegmentMessages(ctx context.Context, sub *pubsub.Subscription, rb *media.RingBuffer) {
+	log.Println("[gossip VideoReceive] Started processing incoming video segment messages for peer", s.node.ID())
+	for {
+		msg, err := sub.Next(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Println("[gossip VideoReceive] Context cancelled, exiting video segment processor.")
+				return
+			}
+			log.Printf("[gossip VideoReceive] Subscription error: %v", err)
+			return // Consider retry or cleaner exit
+		}
+
+		if msg.ReceivedFrom == s.node.ID() {
+			// Optional: log if you want to see self-originated messages being ignored
+			// log.Printf("[gossip VideoReceive] Ignoring self-originated video segment.")
+			continue // Ignore messages broadcast by self
+		}
+
+		var videoSegment p2ppb.VideoSegmentGossip // Use the p2ppb alias
+		if err := proto.Unmarshal(msg.Data, &videoSegment); err != nil {
+			log.Printf("[gossip VideoReceive] Failed to unmarshal VideoSegmentGossip from %s: %v", msg.ReceivedFrom, err)
+			continue
+		}
+
+		// --- Permission Check (PermView) ---
+		// This peer (s.node.ID()) needs PermView to store and play the segment
+		localPeerPermissions := s.roleManager.GetPermissionsForPeer(s.node.ID())
+		if !localPeerPermissions.Has(roles.PermView) {
+			log.Printf("[gossip VideoReceive] No PermView for local peer %s. Dropping video segment %d from %s.", s.node.ID(), videoSegment.SequenceNumber, msg.ReceivedFrom)
+			continue
+		}
+
+		// --- Store Segment in Local RingBuffer ---
+		// Disable events from the RingBuffer when writing segments received from gossip
+		// to prevent re-publishing them if this node *also* happens to be the streamer
+		// (though that's less likely if only one streamer, but good for safety).
+		rb.SetPublishEvents(false)
+		rb.WriteAt(videoSegment.SequenceNumber, videoSegment.Data, 0 /*pts placeholder*/)
+		rb.SetPublishEvents(true) // Re-enable for segments from local ffmpeg
+
+		log.Printf("[gossip VideoReceive] Received and stored video segment %d (%d bytes) from %s.", videoSegment.SequenceNumber, len(videoSegment.Data), msg.ReceivedFrom)
+		s.node.AddBytesDown(uint64(len(msg.Data))) // Track incoming gossip traffic
+	}
+}
+
 func main() {
 	// flags
 	var grpcPort int
@@ -536,14 +642,26 @@ func main() {
 		}
 	}()
 
-	clientpb.RegisterP2PTClientServer(grpcServer, &server{
+	// clientpb.RegisterP2PTClientServer(grpcServer, &server{
+	// Define the server instance that holds all dependencies
+	srvInstance := &server{
 		hlsPort:     hlsPort,
 		hub:         hub,
 		queueCtrl:   queueCtrl,
 		node:        node,
 		roleManager: roleManager,
 		ctrlTopic:   ctrlTopic,
-	})
+	}
+	clientpb.RegisterP2PTClientServer(grpcServer, srvInstance)
+
+	subVideo, err := node.VideoTopic().Subscribe()
+	if err != nil {
+		log.Fatalf("video topic subscribe for receiving failed: %v", err)
+	}
+	go srvInstance.processVideoSegmentMessages(ctx, subVideo, rb) // srvInstance has node, roleManager
+
+	// Start the segment event processor goroutine
+	go srvInstance.processSegmentEvents(ctx, rb)
 
 	// fan‑out StreamStatus to every connected client
 	go func() {

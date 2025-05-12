@@ -2,6 +2,7 @@
 package media
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -18,16 +19,23 @@ type Segment struct {
 	Time time.Time // arrival → garbage‑collection anchor
 }
 
+// SegmentEvent is used to notify about new segments.
+type SegmentEvent struct {
+	Seq uint32
+}
+
 // RingBuffer keeps the last N seconds of segments in RAM.
 // It is safe for concurrent readers & writers.
 type RingBuffer struct {
-	mu       sync.RWMutex
-	capacity int              // #segments == window/2s
-	baseSeq  uint32           // sequence of the *oldest* slot
-	nextSeq  uint32           // next seq to hand out, monotonic ^
-	buf      []Segment        // fixed slice; len==capacity
-	head     int              // write cursor   (0…capacity‑1)
-	now      func() time.Time // injectable clock for tests
+	mu               sync.RWMutex
+	capacity         int               // #segments == window/2s
+	baseSeq          uint32            // sequence of the *oldest* slot
+	nextSeq          uint32            // next seq to hand out, monotonic ^
+	buf              []Segment         // fixed slice; len==capacity
+	head             int               // write cursor   (0…capacity‑1)
+	now              func() time.Time  // injectable clock for tests
+	segmentEventChan chan SegmentEvent // Channel to send notifications
+	publishEvents    bool              // Flag to control event publishing
 }
 
 // NewRingBuffer returns a buffer that holds window seconds of video.
@@ -37,10 +45,24 @@ func NewRingBuffer(windowSeconds int) *RingBuffer {
 		panic("ring_buffer: windowSeconds must be a positive multiple of 2")
 	}
 	return &RingBuffer{
-		capacity: windowSeconds / int(SegmentDuration.Seconds()),
-		buf:      make([]Segment, windowSeconds/int(SegmentDuration.Seconds())),
-		now:      time.Now,
+		capacity:         windowSeconds / int(SegmentDuration.Seconds()),
+		buf:              make([]Segment, windowSeconds/int(SegmentDuration.Seconds())),
+		now:              time.Now,
+		segmentEventChan: make(chan SegmentEvent, 10), // Buffered channel, adjust size as needed
+		publishEvents:    true,                        // Default to true
 	}
+}
+
+// GetSegmentEventChannel returns the read-only channel for segment events.
+func (rb *RingBuffer) GetSegmentEventChannel() <-chan SegmentEvent {
+	return rb.segmentEventChan
+}
+
+// SetPublishEvents enables or disables publishing of segment events.
+func (rb *RingBuffer) SetPublishEvents(publish bool) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.publishEvents = publish
 }
 
 // Len returns how many segments are currently stored (could be less than capacity).
@@ -123,7 +145,6 @@ func (rb *RingBuffer) Get(seq uint32) []byte {
 // like Write does.
 func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64) {
 	rb.mu.Lock()
-	defer rb.mu.Unlock()
 
 	// place the segment at the current head
 	rb.buf[rb.head] = Segment{
@@ -142,5 +163,16 @@ func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64) {
 	// evict anything older than capacity
 	if rb.nextSeq > uint32(rb.capacity) {
 		rb.baseSeq = rb.nextSeq - uint32(rb.capacity)
+	}
+
+	shouldPublish := rb.publishEvents // Read under lock
+	rb.mu.Unlock()                    // Unlock before potentially blocking on channel send
+
+	if shouldPublish {
+		select {
+		case rb.segmentEventChan <- SegmentEvent{Seq: seq}:
+		default:
+			log.Printf("RingBuffer: SegmentEventChan full, dropping event for seq %d", seq)
+		}
 	}
 }

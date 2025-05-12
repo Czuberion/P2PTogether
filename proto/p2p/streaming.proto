@@ -11,3 +11,13 @@ message StreamStatus {
   double duration = 4;  // total length; 0 = continuing live
   bool is_live = 5;     // true ⇒ duration is still growing
 }
+
+// Message to carry individual video segments over GossipSub
+message VideoSegmentGossip {
+  uint32 sequence_number = 1; // Corresponds to HLS media sequence
+  bytes data = 2;             // Raw MPEG-TS segment data
+  // string stream_id = 3;       // Optional: For future multi-stream support
+  // int64 pts_timestamp_ms = 4;  // Optional: If finer-grained PTS is needed
+  // bool is_discontinuity = 5; // Optional: If explicit discontinuity signal is
+  // needed here
+}
