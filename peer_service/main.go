@@ -117,6 +117,35 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			return err // Return error to signal stream closure
 		}
 
+		// Determine Sender Permissions for commands originating from this GUI client
+		senderID := s.node.ID()
+		senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+
+		// Log received command type and HLC for debugging
+		var hlc int64
+		var cmdType string
+		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_QueueCmd); ok {
+			hlc = cmdPl.QueueCmd.HlcTs
+			cmdType = "QueueCmd"
+		}
+		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_SetPeerRolesCmd); ok {
+			hlc = cmdPl.SetPeerRolesCmd.HlcTs
+			cmdType = "SetPeerRolesCmd"
+		}
+		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_UpdateRoleCmd); ok {
+			hlc = cmdPl.UpdateRoleCmd.HlcTs
+			cmdType = "UpdateRoleCmd"
+		}
+		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_RemoveRoleCmd); ok {
+			hlc = cmdPl.RemoveRoleCmd.HlcTs
+			cmdType = "RemoveRoleCmd"
+		}
+		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_PlaybackStateCmd); ok {
+			hlc = cmdPl.PlaybackStateCmd.HlcTs
+			cmdType = "SetPlaybackStateCmd"
+		} // Updated
+		log.Printf("[gRPC Recv %s] Payload: %s, HLC: %d", nodeIDStr, cmdType, hlc)
+
 		switch cmd := clientMsg.Payload.(type) {
 		case *clientpb.ClientMsg_QueueCmd:
 
@@ -132,6 +161,24 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				log.Printf("Error handling QueueCmd (HLC: %d) from local client (node %s): %v", cmd.QueueCmd.HlcTs, nodeIDStr, err)
 				// Decide if the error is fatal for this stream
 				// return err // Example: return error to close stream on failure
+			}
+
+		case *clientpb.ClientMsg_PlaybackStateCmd: // Updated for SetPlaybackStateCmd
+			pbCmd := cmd.PlaybackStateCmd
+			// Permission Check: Any relevant playback permission allows sending state updates
+			permissionOK := senderPerms.Has(roles.PermPlayPause) ||
+				senderPerms.Has(roles.PermSeek) ||
+				senderPerms.Has(roles.PermSetSpeed)
+
+			if !permissionOK {
+				log.Printf("[gRPC Denied %s] SetPlaybackStateCmd denied. Missing required playback permission. HLC: %d", nodeIDStr, pbCmd.HlcTs)
+				continue // Ignore command if permission denied
+			}
+
+			// Wrap in ServerMsg and broadcast via GossipSub
+			serverPl := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaybackStateCmd{PlaybackStateCmd: pbCmd}} // Updated ServerMsg field
+			if err := s.publishToControlTopic(stream.Context(), serverPl); err != nil {
+				log.Printf("[gRPC Error %s] Failed to publish SetPlaybackStateCmd to ctrlTopic: %v. HLC: %d", nodeIDStr, err, pbCmd.HlcTs)
 			}
 
 		case *clientpb.ClientMsg_SetPeerRolesCmd:
@@ -150,6 +197,21 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			log.Printf("Received unhandled message type from %s", nodeIDStr)
 		}
 	}
+}
+
+// Helper to publish any ServerMsg payload to the control topic
+func (s *server) publishToControlTopic(ctx context.Context, msg *clientpb.ServerMsg) error {
+	if s.ctrlTopic == nil {
+		return fmt.Errorf("control topic is nil, cannot publish")
+	}
+	marshalledMsg, err := proto.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ServerMsg for broadcast: %w", err)
+	}
+	if err := s.ctrlTopic.Publish(ctx, marshalledMsg); err != nil {
+		return fmt.Errorf("failed to publish ServerMsg to ctrlTopic: %w", err)
+	}
+	return nil
 }
 
 // Handle incoming SetPeerRolesCmd
@@ -195,13 +257,7 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 		log.Printf("Broadcasting PeerRoleAssignment for %s", actualTargetPeerID)
 		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
 		s.hub.Broadcast(serverPayload)
-		if marshalledMsg, merr := proto.Marshal(serverPayload); merr != nil {
-			log.Printf("Failed to marshal PeerRoleAssignment for broadcast: %v", merr)
-		} else {
-			if perr := s.ctrlTopic.Publish(ctx, marshalledMsg); perr != nil {
-				log.Printf("Failed to publish PeerRoleAssignment to ctrlTopic: %v", perr)
-			}
-		}
+		_ = s.publishToControlTopic(ctx, serverPayload)
 	}
 }
 
@@ -228,13 +284,7 @@ func (s *server) handleUpdateRoleCmd(ctx context.Context, cmd *p2ppb.UpdateRoleC
 		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' updated", cmd.Definition.Name)
 		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: definitionsUpdateMsg}}
 		s.hub.Broadcast(serverPayload)
-		if marshalledMsg, merr := proto.Marshal(serverPayload); merr != nil {
-			log.Printf("Failed to marshal RoleDefinitionsUpdate for broadcast: %v", merr)
-		} else {
-			if perr := s.ctrlTopic.Publish(ctx, marshalledMsg); perr != nil {
-				log.Printf("Failed to publish RoleDefinitionsUpdate to ctrlTopic: %v", perr)
-			}
-		}
+		_ = s.publishToControlTopic(ctx, serverPayload)
 	}
 }
 
@@ -256,17 +306,8 @@ func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleC
 		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' removed", cmd.RoleName)
 		serverPayloadDefs := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: definitionsUpdateMsg}}
 
-		// Broadcast to local clients
 		s.hub.Broadcast(serverPayloadDefs)
-
-		// Publish to other peers via GossipSub
-		if marshalledMsgDefs, mErr := proto.Marshal(serverPayloadDefs); mErr != nil {
-			log.Printf("Failed to marshal RoleDefinitionsUpdate (for remove) for GossipSub publish: %v", mErr)
-		} else {
-			if pubErr := s.ctrlTopic.Publish(ctx, marshalledMsgDefs); pubErr != nil {
-				log.Printf("Failed to publish RoleDefinitionsUpdate (for remove) to ctrlTopic: %v", pubErr)
-			}
-		}
+		_ = s.publishToControlTopic(ctx, serverPayloadDefs)
 	}
 
 	for _, assignmentMsg := range affectedAssignments {
@@ -274,17 +315,8 @@ func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleC
 		log.Printf("Broadcasting PeerRoleAssignment update for peer %s after role '%s' removed", assignmentMsg.PeerId, cmd.RoleName)
 		serverPayloadAssign := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
 
-		// Broadcast to local clients
 		s.hub.Broadcast(serverPayloadAssign)
-
-		// Publish to other peers via GossipSub
-		if marshalledMsgAssign, mErr := proto.Marshal(serverPayloadAssign); mErr != nil {
-			log.Printf("Failed to marshal PeerRoleAssignment (for remove) for GossipSub publish: %v", mErr)
-		} else {
-			if pubErr := s.ctrlTopic.Publish(ctx, marshalledMsgAssign); pubErr != nil {
-				log.Printf("Failed to publish PeerRoleAssignment (for remove) to ctrlTopic: %v", pubErr)
-			}
-		}
+		_ = s.publishToControlTopic(ctx, serverPayloadAssign)
 	}
 }
 
@@ -358,6 +390,8 @@ func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, 
 			handleGossipPeerRoleAssignment(payload.PeerRoleAssignment, msg.ReceivedFrom, rm, localHub, node, qc, myID)
 		case *clientpb.ServerMsg_AllPeerRoleAssignments:
 			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, rm, localHub, node, qc)
+		case *clientpb.ServerMsg_PlaybackStateCmd:
+			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, localHub)
 		default:
 			log.Printf("[gossip] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
 		}
@@ -423,6 +457,13 @@ func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, 
 			node.ReactToQueueUpdate(qc, rm)
 		}
 	}
+}
+
+// handleGossipPlaybackStateCmd forwards a SetPlaybackStateCmd received via GossipSub to the local GUI via the Hub.
+func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, hub *p2p.Hub) {
+	log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d) from %s. Broadcasting to local hub.", cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, from)
+	serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaybackStateCmd{PlaybackStateCmd: cmd}} // Updated ServerMsg field
+	hub.Broadcast(serverMsg)                                                                               // Send to the connected GUI client(s)
 }
 
 // processSegmentEvents listens for new segments from the local RingBuffer (written by ffmpeg via IngestHandler),

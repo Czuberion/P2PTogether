@@ -31,7 +31,7 @@ message ClientMsg {
   // oneof { your various client→service payloads go here }
   oneof payload {
     client.p2p.QueueCmd queue_cmd = 1;
-    client.p2p.PlaybackCmd playback_cmd = 2;
+    client.p2p.SetPlaybackStateCmd playback_state_cmd = 2;
     client.p2p.ChatCmd chat_cmd = 3;
     client.p2p.SetPeerRolesCmd set_peer_roles_cmd = 4;
     client.p2p.UpdateRoleCmd update_role_cmd = 5;
@@ -50,6 +50,7 @@ message ServerMsg {
     client.p2p.PeerRoleAssignment peer_role_assignment = 6;
     client.p2p.AllPeerRoleAssignments all_peer_role_assignments = 7;
     LocalPeerIdentity local_peer_identity = 8;
+    client.p2p.SetPlaybackStateCmd playback_state_cmd = 9;
   }
 }
 

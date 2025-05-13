@@ -3,14 +3,15 @@ package client.p2p;
 
 option go_package = "peer_service/proto/p2p";
 
-message PlaybackCmd {
-  enum Type {
-    PLAY = 0;
-    PAUSE = 1;
-    SEEK = 2;  // value = target seconds
-    SPEED = 3; // value = multiplier (e.g. 1.25)
-  }
-  Type type = 1;
-  double value = 2;
-  int64 hlc_ts = 3; // Hybrid Logical Clock
+// Command and State for Playback Synchronization.
+// Represents the *target* state of the player.
+message SetPlaybackStateCmd {
+  // Target position in the video (seconds).
+  double target_time_pos = 1;
+  // Target playing state (true = playing, false = paused).
+  bool target_is_playing = 2;
+  // Target playback speed multiplier (e.g., 1.0, 1.5).
+  double target_speed = 3;
+  // Hybrid Logical Clock timestamp for ordering this state command.
+  int64 hlc_ts = 4;
 }
