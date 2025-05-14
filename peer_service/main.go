@@ -117,6 +117,12 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			return err // Return error to signal stream closure
 		}
 
+		// Check if the stream's context has been cancelled (e.g., client disconnected or server shutting down)
+		if stream.Context().Err() != nil {
+			log.Printf("ControlStream for %s: stream context error: %v. Exiting handler.", nodeIDStr, stream.Context().Err())
+			return stream.Context().Err()
+		}
+
 		// Determine Sender Permissions for commands originating from this GUI client
 		senderID := s.node.ID()
 		senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
@@ -195,6 +201,11 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 		default:
 			log.Printf("Received unhandled message type from %s", nodeIDStr)
+		}
+
+		if stream.Context().Err() != nil {
+			log.Printf("ControlStream for %s: stream context cancelled. Exiting.", nodeIDStr)
+			return stream.Context().Err()
 		}
 	}
 }

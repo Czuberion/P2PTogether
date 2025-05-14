@@ -24,7 +24,7 @@
 
 int main(int argc, char* argv[]) {
     // Set up Qt Application context first
-    QApplication app(argc, argv);
+    QApplication qtApp(argc, argv);
     QCoreApplication::setApplicationName("P2PTogether");
     QCoreApplication::setApplicationVersion("0.1");
 
@@ -95,19 +95,8 @@ int main(int argc, char* argv[]) {
     }
     qInfo() << "Started peer_service process.";
 
-    // TODO: Replace with proper peer handling by the Go service.
-    std::string peerId = "defaultPeerId";
-    if (peerId.empty()) {
-        qWarning() << "Peer ID is empty, using default. Pipe creation might "
-                      "fail or collide.";
-        peerId = "errorPeerId";
-    }
-
-    // Construct the Peer object with the chosen peer ID.
-    P2P::Peer peer(peerId);
-    // Launch the main Qt GUI event loop.
-    int exitCode =
-        gui::runGUI(&peer, grpcPort); // runGUI should return the exec() code
+    gui::App app(grpcPort);
+    int exitCode = app.exec();
 
     // Ensure the peer service is terminated when the GUI exits
     qInfo() << "Requesting peer_service termination..."; // Add log

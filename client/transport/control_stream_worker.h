@@ -22,13 +22,14 @@ public:
                                  QObject* parent = nullptr);
     ~ControlStreamWorker() override;
 
+    void stop();
+    bool isQuitFlagSet() const;
+
 public Q_SLOTS:
     //! enqueue a ClientMsg to be written on the stream
     void send(const client::ClientMsg& msg);
     //! kicks off the blocking read-loop
     void start();
-    //! ask the worker to shut down gracefully
-    void stop();
 
 Q_SIGNALS:
     //! emitted on **any** ServerMsg (slot in GUI decides what to do)

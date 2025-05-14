@@ -13,6 +13,8 @@
  */
 #pragma once
 
+#include "transport/control_stream_worker.h"
+
 #include <QMainWindow> // Needed for fullscreen toggle
 #include <QWidget>
 
@@ -31,9 +33,11 @@ namespace gui {
  *
  * \param mpvManager Pointer to the MpvManager instance for controlling mpv.
  * \param mainWindow Pointer to the main QMainWindow (for fullscreen toggling).
+ * \param worker Pointer to the ControlStreamWorker for sending playback state.
  * \return QWidget* The constructed video panel widget.
  */
 QWidget* createVideoPanel(player::MpvManager* mpvManager,
-                          QMainWindow* mainWindow);
+                          QMainWindow* mainWindow,
+                          P2P::ControlStreamWorker* worker);
 
 } // namespace gui

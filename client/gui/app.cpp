@@ -1,201 +1,313 @@
 #include "gui/app.h"
+#include "client.pb.h"
 #include "gui/menus.h"
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
+#include "p2p/playback.pb.h"
 #include "player/mpv_manager.h"
-#include "roles/role_store.h"
-#include "transport/control_stream_worker.h"
 #include "transport/grpc_client.h"
 
+#include <QApplication>
 #include <QDebug>
 #include <QHBoxLayout>
+#include <QMainWindow>
 #include <QMetaObject>
+#include <QPushButton>
 #include <QSplitter>
 #include <QThread>
 #include <QWidget>
+#include <clocale>
 #include <stdexcept>
 
 namespace gui {
 
-int runGUI(P2P::Peer* peer, quint16 grpcPort) {
-    // Qt sets the locale in the QApplication constructor, but libmpv requires
-    // the LC_NUMERIC category to be set to "C", so change it back.
-    setlocale(LC_NUMERIC, "C");
+App::App(quint16 grpcPort, QObject* parent) :
+    QObject(parent), m_grpcPort(grpcPort), m_lastAppliedPlaybackHlc(-1) {
+    // Initialize other members to nullptr or default values if necessary
+    m_roleStore =
+        new P2P::Roles::RoleStore(this); // Parent to App for auto-deletion
+}
 
-    // Add a small delay to allow the peer_service gRPC server to fully start
-    // This is a simple workaround for potential race conditions on startup.
-    QThread::msleep(500); // Wait for 500 milliseconds
+App::~App() {
+    qInfo() << "App::~App() destructor called.";
+    cleanup(); // Ensure cleanup is called
+    // m_roleStore is managed by QObject parent-child, no need to delete
+    // explicitly m_worker and m_mainWindow might need explicit deletion if not
+    // parented or handled by Qt
+}
 
-    // --- Instantiate gRPC Client pointed at the dynamic port  ---
+void App::onServerMessage(const client::ServerMsg& msg) {
+    qInfo() << "[control‑stream] App::onServerMessage received payload type"
+            << msg.payload_case();
+
+    switch (msg.payload_case()) {
+    case client::ServerMsg::kRoleDefinitionsUpdate:
+        m_roleStore->processRoleDefinitionsUpdate(
+            msg.role_definitions_update());
+        break;
+    case client::ServerMsg::kPeerRoleAssignment:
+        m_roleStore->processPeerRoleAssignment(msg.peer_role_assignment());
+        break;
+    case client::ServerMsg::kAllPeerRoleAssignments:
+        m_roleStore->processAllPeerAssignments(msg.all_peer_role_assignments());
+        break;
+    case client::ServerMsg::kLocalPeerIdentity:
+        m_roleStore->setLocalPeerId(
+            QString::fromStdString(msg.local_peer_identity().peer_id()));
+        qInfo() << "GUI: Received LocalPeerIdentity, my ID is now:"
+                << m_roleStore->getLocalPeerId();
+        break;
+    case client::ServerMsg::kPlaybackStateCmd: {
+        if (!m_mpvWidget) {
+            qWarning() << "Received PlaybackStateCmd but m_mpvWidget is null!";
+            break;
+        }
+        const auto& cmd = msg.playback_state_cmd();
+        qInfo() << "Received PlaybackStateCmd HLC:" << cmd.hlc_ts()
+                << " vs LastApplied:" << m_lastAppliedPlaybackHlc;
+
+        if (cmd.hlc_ts() > m_lastAppliedPlaybackHlc) {
+            qInfo() << "Applying received PlaybackStateCmd: Play"
+                    << cmd.target_is_playing() << "Pos" << cmd.target_time_pos()
+                    << "Speed" << cmd.target_speed();
+
+            m_mpvWidget->setProperty("speed", cmd.target_speed());
+            // mpv's 'seek X absolute' preserves play/pause state
+            m_mpvWidget->command(QStringList()
+                                 << "seek"
+                                 << QString::number(cmd.target_time_pos())
+                                 << "absolute");
+            m_mpvWidget->setProperty("pause", !cmd.target_is_playing());
+
+            if (m_playPauseBtn) {
+                m_playPauseBtn->setText(cmd.target_is_playing() ? "⏸" : "▶");
+                m_playPauseBtn->setToolTip(cmd.target_is_playing() ? "Pause"
+                                                                   : "Play");
+            }
+            // if (m_seekSlider)
+            // m_seekSlider->setValue(static_cast<int>(cmd.target_time_pos()));
+
+            m_lastAppliedPlaybackHlc = cmd.hlc_ts();
+        } else {
+            qInfo() << "Ignoring stale PlaybackStateCmd HLC:" << cmd.hlc_ts();
+        }
+    } break;
+    // TODO: Handle kQueueUpdate, kStreamStatus, kChatMsg
+    default:
+        qInfo() << "App::onServerMessage: Unhandled message type:"
+                << msg.payload_case();
+        break;
+    }
+}
+
+void App::onNetThreadStarted() {
+    qInfo() << "App::onNetThreadStarted - netThread (ID: "
+            << QThread::currentThreadId() << ") has started for worker.";
+}
+
+void App::setupP2P() {
     P2P::GrpcClient grpcClient(
-        QString("127.0.0.1:%1").arg(grpcPort).toStdString());
-    quint32 hlsPort = 0;
-    try {
-        client::ServiceInfo serviceInfo = grpcClient.getServiceInfo();
-        hlsPort                         = serviceInfo.hls_port();
-        qInfo() << "Successfully fetched HLS port from peer service:"
-                << hlsPort;
-    } catch (const std::runtime_error& e) {
-        qCritical() << "Failed to get service info from peer_service:"
-                    << e.what();
-        return -1;
-    }
+        QString("127.0.0.1:%1").arg(m_grpcPort).toStdString());
 
-    if (hlsPort == 0) {
-        qCritical() << "Received invalid HLS port (0) from peer service.";
-        return -1;
-    }
-
-    // --- Create MpvManager with the HLS URL provided by the Peer Service ---
-    QString hlsUrl = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
-    player::MpvManager mpvManager(hlsUrl);
-
-    // --- Instantiate RoleStore ---
-    P2P::Roles::RoleStore roleStore;
-
-    // --- Placeholder for our actual Peer ID, to be received from service ---
-    // The 'peer' object passed to runGUI is mostly a dummy for roles for now.
-    // We'll update its peerId field when we get the LocalPeerIdentity.
-
-    // --- Main Window Setup ---
-    QMainWindow window;
-    window.setWindowTitle("P2PTogether");
-    window.resize(1200, 700);
-
-    // -------- control-stream worker thread ----------
-    // Create thread and worker without parents initially
-    QThread* netThread = new QThread();
-    auto worker        = new P2P::ControlStreamWorker(
+    QThread* netThread = new QThread(this);
+    m_worker           = new P2P::ControlStreamWorker(
         std::make_unique<P2P::GrpcClient>(std::move(grpcClient)), nullptr);
 
-    // ---- observe the worker for debugging / UX feedback ----
-    QObject::connect(worker, &P2P::ControlStreamWorker::finished, &window,
-                     [](const QString& reason) {
-                         qWarning() << "[control‑stream]" << reason;
-                     });
+    qInfo() << "App::setupP2P - Worker created, moving to new thread. Main "
+               "thread ID:"
+            << QThread::currentThreadId();
 
-    // --- Connect ControlStreamWorker::serverMsg to RoleStore and other
-    // handlers ---
-    QObject::connect(
-        worker, &P2P::ControlStreamWorker::serverMsg, &window,
-        [&roleStore, peer](const client::ServerMsg& msg) {
-            qDebug() << "[control‑stream] received payload type"
-                     << msg.payload_case();
-            // Delegate to RoleStore for role-related messages
-            switch (msg.payload_case()) {
-            case client::ServerMsg::kRoleDefinitionsUpdate:
-                // Use QMetaObject::invokeMethod if roleStore might
-                // be in a different thread or if its methods are
-                // not reentrant and worker is on another thread.
-                // For now, assuming direct call is okay if signals
-                // are queued or same thread. QueuedConnection on
-                // the original connect() helps here.
-                roleStore.processRoleDefinitionsUpdate(
-                    msg.role_definitions_update());
-                break;
-            case client::ServerMsg::kPeerRoleAssignment:
-                roleStore.processPeerRoleAssignment(msg.peer_role_assignment());
-                break;
-            case client::ServerMsg::kAllPeerRoleAssignments:
-                roleStore.processAllPeerAssignments(
-                    msg.all_peer_role_assignments());
-                break;
-            case client::ServerMsg::kLocalPeerIdentity:
-                roleStore.setLocalPeerId(QString::fromStdString(
-                    msg.local_peer_identity().peer_id()));
-                // The dummy 'peer' object is less important now for ID.
-                // RoleStore holds the true one.
-                qInfo() << "GUI: Received LocalPeerIdentity, my ID is now:"
-                        << roleStore.getLocalPeerId();
-                // TODO: May need to trigger UI updates that depend on knowing
-                // the true local peer ID. For example, refresh role menus or
-                // permission-gated elements if they were initialized before
-                // this ID was known. Or connect to a new signal from P2P::Peer.
-                break;
-            // TODO: Add cases for kQueueUpdate to update
-            // QListWidget (as done previously) and other ServerMsg
-            // types.
-            default: break;
-            }
-        });
+    m_worker->moveToThread(netThread);
 
-    worker->moveToThread(netThread);
+    qInfo() << "App::setupP2P - Worker affinity set to netThread (ID: "
+            << netThread << ").";
 
-    // When thread starts, run the worker's main function
-    QObject::connect(netThread, &QThread::started, worker,
-                     &P2P::ControlStreamWorker::start);
+    // Connect App's slot to netThread's started signal
+    connect(netThread, &QThread::started, this, &App::onNetThreadStarted);
+    // Connect netThread's started signal to worker's start slot
+    connect(netThread, &QThread::started, m_worker,
+            &P2P::ControlStreamWorker::start);
 
-    // When worker finishes processing, tell the thread's event loop to quit
-    QObject::connect(worker, &P2P::ControlStreamWorker::finished, netThread,
-                     &QThread::quit);
+    // Other connections for worker finished, thread finished, etc.
+    connect(m_worker, &P2P::ControlStreamWorker::serverMsg, this,
+            &App::onServerMessage);
 
-    // When the thread finishes (after quit() and run() returns), schedule
-    // worker deletion
-    QObject::connect(netThread, &QThread::finished, worker,
-                     &QObject::deleteLater);
+    connect(m_worker, &P2P::ControlStreamWorker::finished, this,
+            [](const QString& reason) {
+                // This lambda runs in the main thread due to Qt::AutoConnection
+                // (default) or explicit Qt::QueuedConnection.
+                qInfo() << "App LAMBDA: ControlStreamWorker finished. Reason: "
+                        << reason;
+                // Any further complex UI updates or logic here should be
+                // careful, as the application might be in the process of
+                // shutting down.
+            });
 
-    // When the thread finishes, schedule the thread object itself for deletion
-    QObject::connect(netThread, &QThread::finished, netThread,
-                     &QObject::deleteLater);
+    connect(m_worker, &P2P::ControlStreamWorker::finished, netThread,
+            &QThread::quit, Qt::QueuedConnection);
+    qInfo()
+        << "App::setupP2P - Connected m_worker::finished to netThread::quit.";
 
-    // --- Application Cleanup ---
-    QObject::connect(
-        QApplication::instance(), &QApplication::aboutToQuit,
-        [peer, worker]() { // Capture worker by pointer
-            qDebug() << "GUI about to quit; initiating cleanup...";
-            // Request the worker to stop (will run in netThread)
-            // Use QueuedConnection so it posts an event to the netThread's loop
-            QMetaObject::invokeMethod(worker, "stop", Qt::QueuedConnection);
-            peer->cleanup(); // Call peer cleanup (runs in main thread)
-            qDebug() << "Peer cleanup requested.";
-            // Don't wait here; signals handle thread termination.
-        });
+    connect(netThread, &QThread::finished, m_worker, &QObject::deleteLater,
+            Qt::QueuedConnection); // worker first
+    connect(netThread, &QThread::finished, netThread, &QObject::deleteLater);
 
-    netThread->start(); // Start the thread's event loop
+    qInfo() << "App::setupP2P - Starting netThread (ID: " << netThread
+            << ")...";
+
+    netThread->start();
+
+    qInfo() << "App::setupP2P - netThread->start() called. isRunning: "
+            << netThread->isRunning();
+}
+
+void App::setupUI() {
+    // --- Main Window Setup ---
+    m_mainWindow = new QMainWindow(); // No parent, top-level window
+    m_mainWindow->setWindowTitle("P2PTogether");
+    m_mainWindow->resize(1200, 700);
+
+    quint32 hlsPort = 0;
+    { // Scope for GrpcClient to get HLS port
+        P2P::GrpcClient tempGrpcClient(
+            QString("127.0.0.1:%1").arg(m_grpcPort).toStdString());
+        try {
+            client::ServiceInfo serviceInfo = tempGrpcClient.getServiceInfo();
+            hlsPort                         = serviceInfo.hls_port();
+            qInfo() << "Successfully fetched HLS port from peer service:"
+                    << hlsPort;
+        } catch (const std::runtime_error& e) {
+            qCritical() << "Failed to get service info from peer_service:"
+                        << e.what();
+            // Handle error appropriately, maybe exit or show message
+            return;
+        }
+    }
+    if (hlsPort == 0) {
+        qCritical() << "Received invalid HLS port (0) from peer service.";
+        return;
+    }
+
+    QString hlsUrl = QString("http://127.0.0.1:%1/stream.m3u8").arg(hlsPort);
+    player::MpvManager* mpvManager =
+        new player::MpvManager(hlsUrl, this); // Parent to App
+
+    // --- Dummy Peer ---
+    P2P::Peer peer("dummyAppPeer"); // Still needed if
+                                    // createMenus/createRightPanel expect it
 
     // Create central widget and main layout
-    QWidget* centralWidget = new QWidget(&window);
-    window.setCentralWidget(centralWidget);
+    QWidget* centralWidget = new QWidget(m_mainWindow);
+    m_mainWindow->setCentralWidget(centralWidget);
     QHBoxLayout* mainLayout = new QHBoxLayout(centralWidget);
     centralWidget->setLayout(mainLayout);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
-    // Main splitter
     QSplitter* mainSplitter = new QSplitter(Qt::Horizontal, centralWidget);
     mainLayout->addWidget(mainSplitter);
 
-    // Left panel: video playback (pass MpvManager and window)
-    QWidget* leftPanel = createVideoPanel(&mpvManager, &window);
-    if (!leftPanel) { // Handle potential errors from createVideoPanel
+    QWidget* leftPanel = createVideoPanel(mpvManager, m_mainWindow, m_worker);
+    if (!leftPanel) {
         qCritical() << "Failed to create video panel!";
-        // Consider showing an error message
-        return -1;
+        return;
     }
     mainSplitter->addWidget(leftPanel);
+    m_mpvWidget =
+        leftPanel->findChild<player::MpvWidget*>(); // Find after creation
+    if (!m_mpvWidget)
+        qWarning() << "App::setupUI: MpvWidget not found in leftPanel!";
+    m_playPauseBtn = leftPanel->findChild<QPushButton*>("playPauseBtn");
+    if (!m_playPauseBtn)
+        qWarning() << "App::setupUI: playPauseBtn not found in leftPanel!";
 
-    // Right panel: chat, queue, etc.
-    QWidget* rightPanel = createRightPanel(peer, &window, worker, &roleStore);
+    QWidget* rightPanel =
+        createRightPanel(&peer, m_mainWindow, m_worker, m_roleStore);
     mainSplitter->addWidget(rightPanel);
     rightPanel->setMinimumWidth(300);
 
-    // Set splitter sizes: 65% left, 35% right
     QList<int> sizes;
-    sizes << int(window.width() * 0.65) << int(window.width() * 0.35);
+    sizes << int(m_mainWindow->width() * 0.65)
+          << int(m_mainWindow->width() * 0.35);
     mainSplitter->setSizes(sizes);
-    mainSplitter->setCollapsible(0, false); // Keep video panel always visible
+    mainSplitter->setCollapsible(0, false);
 
-    // Create menus
-    createMenus(&window, peer, &roleStore, mainSplitter, rightPanel, leftPanel,
-                worker);
+    createMenus(m_mainWindow, &peer, m_roleStore, mainSplitter, rightPanel,
+                leftPanel, m_worker);
+    m_mainWindow->show();
+}
 
-    window.show();
-    // Return the exit code from the application event loop
-    int rc = QApplication::exec();
+void App::cleanup() {
+    qInfo() << "App::cleanup() entered.";
+    if (m_isCleaningUp) {
+        qInfo() << "App::cleanup() - already in progress, returning.";
+        return;
+    }
+    m_isCleaningUp = true;
 
-    qDebug() << "QApplication::exec() finished with code:" << rc;
+    if (m_worker) {
+        QThread* netThread = m_worker->thread();
+        if (netThread && netThread != QCoreApplication::instance()->thread()) {
+            bool workerWasLikelyRunning = !m_worker->isQuitFlagSet();
 
-    return rc;
+            if (netThread->isRunning() || workerWasLikelyRunning) {
+                qInfo() << "App::cleanup() - Requesting worker stop...";
+                m_worker->stop(); // Tell the worker's run() loop to finish.
+
+                qInfo() << "App::cleanup() - Worker stop requested. Processing "
+                           "events to allow thread quit signal...";
+
+                QEventLoop loop;
+                QTimer::singleShot(
+                    200, &loop,
+                    &QEventLoop::quit); // Process events for max 200ms
+                loop.exec();
+                qInfo() << "App::cleanup() - Event processing finished. "
+                           "netThread isRunning:"
+                        << netThread->isRunning();
+            } else {
+                qInfo() << "App::cleanup() - Network thread was not running or "
+                           "worker not in a separate thread.";
+                if (m_worker) {
+                    m_worker->deleteLater(); // Still use deleteLater for safety
+                    m_worker = nullptr;
+                }
+            }
+        } else {
+            qInfo() << "App::cleanup() - Worker has no valid separate thread "
+                       "or is in main thread.";
+            if (m_worker) { // If worker exists but not in a separate manageable
+                            // thread
+                m_worker->deleteLater(); // Worker in main thread
+                m_worker = nullptr;
+            }
+        }
+    }
+
+    if (m_mainWindow && !m_mainWindow->parent()) {
+        qInfo() << "App::cleanup() - Main window exists and is top-level. Will "
+                   "be handled by QApplication.";
+    }
+    m_mainWindow = nullptr;
+    qInfo() << "App::cleanup() finished executing its own logic.";
+}
+
+int App::exec() {
+    // QApplication instance is now created in main.cpp and passed or App
+    // creates it. For this structure, main.cpp creates QApplication. App::exec
+    // uses it.
+    Q_ASSERT(QApplication::instance() != nullptr);
+
+    std::setlocale(LC_NUMERIC, "C");
+    QThread::msleep(500); // Allow peer_service to start
+
+    setupP2P();
+    setupUI();
+
+    connect(QApplication::instance(), &QApplication::aboutToQuit, this,
+            &App::cleanup);
+
+    return QApplication::exec();
 }
 
 } // namespace gui
