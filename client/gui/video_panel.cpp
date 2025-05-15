@@ -113,11 +113,11 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     // --- Control Buttons ---
 
     // Skip back (assuming previous item in a playlist - not implemented yet)
-    QPushButton* skipBtn = new QPushButton("⏮");
-    skipBtn->setFixedSize(40, 40);
-    skipBtn->setStyleSheet("font-size: 20px; text-align: center;");
-    skipBtn->setToolTip("Skip to previous (NYI)");
-    controlLayout->addWidget(skipBtn);
+    QPushButton* skipBackBtn = new QPushButton("⏮");
+    skipBackBtn->setFixedSize(40, 40);
+    skipBackBtn->setStyleSheet("font-size: 20px; text-align: center;");
+    skipBackBtn->setToolTip("Skip to previous (NYI)");
+    controlLayout->addWidget(skipBackBtn);
 
     // Rewind (seek backwards)
     QPushButton* rewindBtn = new QPushButton("⏪");
