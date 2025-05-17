@@ -15,10 +15,10 @@ import (
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"google.golang.org/grpc"
@@ -52,6 +52,11 @@ type server struct {
 
 	// GossipSub control topic
 	ctrlTopic *pubsub.Topic
+
+	// GossipSub chat topic
+	chatTopic *pubsub.Topic
+
+	triggerHLSDircontinuity func()
 }
 
 func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientpb.ServiceInfo, error) {
@@ -60,39 +65,46 @@ func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientp
 
 // Send initial state (role definitions, all assignments, current queue) to a newly connected client.
 func (s *server) sendInitialState(stream clientpb.P2PTClient_ControlStreamServer) {
-	// 1. Send Role Definitions
-	defs := s.roleManager.GetDefinitions()
-
-	// Send Local Peer Identity first (or as part of initial state)
+	// 1. Send Local Peer Identity first
 	identityMsg := &clientpb.LocalPeerIdentity{PeerId: s.node.ID().String()}
 	if err := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_LocalPeerIdentity{LocalPeerIdentity: identityMsg}}); err != nil {
 		log.Printf("Error sending LocalPeerIdentity to client for node %s: %v", s.node.ID(), err)
-		// Decide if this is a fatal error for the stream
+		return // If this fails, further state is problematic
 	}
+
+	// 2. Send Role Definitions
+	defs := s.roleManager.GetDefinitions()
 
 	pbDefs := make([]*p2ppb.RoleDefinition, 0, len(defs))
 	for _, d := range defs {
 		pbDefs = append(pbDefs, &p2ppb.RoleDefinition{Name: d.Name, Permissions: uint32(d.Permissions)})
 	}
 	defUpdate := &p2ppb.RoleDefinitionsUpdate{Definitions: pbDefs, HlcTs: common.GetCurrentHLC()}
-	_ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: defUpdate}}) // Error handling omitted for brevity
+	if err := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: defUpdate}}); err != nil {
+		log.Printf("Error sending RoleDefinitionsUpdate: %v", err)
+	}
 
-	// 2. Send All Peer Assignments
+	// 3. Send All Peer Assignments
 	assignmentsSnapshot := s.roleManager.GetAllAssignments()
 	allAssignmentsMsg := &p2ppb.AllPeerRoleAssignments{
 		Assignments: assignmentsSnapshot,
-		HlcTs:       common.GetCurrentHLC(), // Timestamp for the snapshot itself
+		HlcTs:       common.GetCurrentHLC(),
 	}
-	_ = stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: allAssignmentsMsg}})
+	if err := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: allAssignmentsMsg}}); err != nil {
+		log.Printf("Error sending AllPeerRoleAssignments: %v", err)
+	}
 
-	// 3. Send Current Queue State
-	queueSnapshot := s.queueCtrl.Snapshot() // Assuming Snapshot() is public or accessible
-	if qu, ok := queueSnapshot.GetPayload().(*clientpb.ServerMsg_QueueUpdate); ok {
+	// 4. Send Current Queue State
+	queueSnapshotMsg := s.queueCtrl.Snapshot()
+	if qu, ok := queueSnapshotMsg.GetPayload().(*clientpb.ServerMsg_QueueUpdate); ok {
 		qu.QueueUpdate.HlcTs = common.GetCurrentHLC() // Add HLC to queue snapshot if it has a place for it
 	}
-	_ = stream.Send(queueSnapshot)
 
-	log.Printf("Sent initial state (roles, queue) to client for node %s", s.node.ID())
+	if err := stream.Send(queueSnapshotMsg); err != nil {
+		log.Printf("Error sending QueueUpdate snapshot: %v", err)
+	}
+
+	log.Printf("Sent initial state (identity, roles, queue) to client for node %s", s.node.ID())
 }
 
 func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) error {
@@ -104,8 +116,6 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 	s.sendInitialState(stream)
 
 	defer func() {
-		// s.hub.Remove(pid.String())
-		// log.Printf("Client %s removed from hub.", pid.String()) // Log removal
 		s.hub.Remove(nodeIDStr)
 		log.Printf("Client connection associated with node %s removed from hub.", nodeIDStr)
 	}()
@@ -113,65 +123,49 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 	for {
 		clientMsg, err := stream.Recv()
 		if err != nil {
-			log.Printf("Client associated with node %s disconnected: %v", nodeIDStr, err)
-			return err // Return error to signal stream closure
+			if stream.Context().Err() != nil {
+				log.Printf("ControlStream for %s: stream context error (likely client disconnected): %v", nodeIDStr, stream.Context().Err())
+			} else {
+				log.Printf("ControlStream for %s: Recv() error: %v", nodeIDStr, err)
+			}
+			return err
 		}
 
-		// Check if the stream's context has been cancelled (e.g., client disconnected or server shutting down)
-		if stream.Context().Err() != nil {
-			log.Printf("ControlStream for %s: stream context error: %v. Exiting handler.", nodeIDStr, stream.Context().Err())
-			return stream.Context().Err()
-		}
+		senderID := s.node.ID() // Commands from GUI are from this node
 
-		// Determine Sender Permissions for commands originating from this GUI client
-		senderID := s.node.ID()
-		senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
-
-		// Log received command type and HLC for debugging
 		var hlc int64
-		var cmdType string
+		var cmdTypeString string
+
 		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_QueueCmd); ok {
 			hlc = cmdPl.QueueCmd.HlcTs
-			cmdType = "QueueCmd"
-		}
-		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_SetPeerRolesCmd); ok {
+			cmdTypeString = fmt.Sprintf("QueueCmd (Type: %s, Path: %s, Index: %d)", cmdPl.QueueCmd.Type, cmdPl.QueueCmd.FilePath, cmdPl.QueueCmd.Index)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_SetPeerRolesCmd); ok {
 			hlc = cmdPl.SetPeerRolesCmd.HlcTs
-			cmdType = "SetPeerRolesCmd"
-		}
-		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_UpdateRoleCmd); ok {
+			cmdTypeString = fmt.Sprintf("SetPeerRolesCmd (Target: %s, Roles: %v)", cmdPl.SetPeerRolesCmd.TargetPeerId, cmdPl.SetPeerRolesCmd.AssignedRoleNames)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_UpdateRoleCmd); ok {
 			hlc = cmdPl.UpdateRoleCmd.HlcTs
-			cmdType = "UpdateRoleCmd"
-		}
-		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_RemoveRoleCmd); ok {
+			cmdTypeString = fmt.Sprintf("UpdateRoleCmd (Name: %s, Perms: %d)", cmdPl.UpdateRoleCmd.Definition.Name, cmdPl.UpdateRoleCmd.Definition.Permissions)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_RemoveRoleCmd); ok {
 			hlc = cmdPl.RemoveRoleCmd.HlcTs
-			cmdType = "RemoveRoleCmd"
-		}
-		if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_PlaybackStateCmd); ok {
+			cmdTypeString = fmt.Sprintf("RemoveRoleCmd (Name: %s)", cmdPl.RemoveRoleCmd.RoleName)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_PlaybackStateCmd); ok {
 			hlc = cmdPl.PlaybackStateCmd.HlcTs
-			cmdType = "SetPlaybackStateCmd"
-		} // Updated
-		log.Printf("[gRPC Recv %s] Payload: %s, HLC: %d", nodeIDStr, cmdType, hlc)
+			cmdTypeString = fmt.Sprintf("SetPlaybackStateCmd (Playing: %v, Pos: %.2f, Speed: %.2f)", cmdPl.PlaybackStateCmd.TargetIsPlaying, cmdPl.PlaybackStateCmd.TargetTimePos, cmdPl.PlaybackStateCmd.TargetSpeed)
+		} else {
+			cmdTypeString = fmt.Sprintf("Unknown type %T", clientMsg.Payload)
+		}
+		log.Printf("[gRPC Recv %s] %s, HLC: %d", nodeIDStr, cmdTypeString, hlc)
 
 		switch cmd := clientMsg.Payload.(type) {
 		case *clientpb.ClientMsg_QueueCmd:
-
-			// Pass context from stream for cancellation propagation if Publish blocks.
-			// Pass s.node and s.ctrlTopic for Handle to use.
-			// if err := s.queueCtrl.Handle(stream.Context(), x.QueueCmd, pid, perms, s.hub, s.node, s.ctrlTopic); err != nil {
-			// 	log.Printf("Error handling QueueCmd from %s: %v", pid.String(), err)
-
-			// Pass the node's ID as the 'sender' for commands originating from the local gRPC client.
-
-			// Permission check now happens inside Handle using RoleManager
-			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, s.node.ID(), s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
-				log.Printf("Error handling QueueCmd (HLC: %d) from local client (node %s): %v", cmd.QueueCmd.HlcTs, nodeIDStr, err)
-				// Decide if the error is fatal for this stream
-				// return err // Example: return error to close stream on failure
+			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, senderID, s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
+				log.Printf("Error handling QueueCmd from %s: %v", nodeIDStr, err)
 			}
 
 		case *clientpb.ClientMsg_PlaybackStateCmd: // Updated for SetPlaybackStateCmd
 			pbCmd := cmd.PlaybackStateCmd
 			// Permission Check: Any relevant playback permission allows sending state updates
+			senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
 			permissionOK := senderPerms.Has(roles.PermPlayPause) ||
 				senderPerms.Has(roles.PermSeek) ||
 				senderPerms.Has(roles.PermSetSpeed)
@@ -189,20 +183,21 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 		case *clientpb.ClientMsg_SetPeerRolesCmd:
 			log.Printf("Received SetPeerRolesCmd (HLC: %d) from %s for target %s", cmd.SetPeerRolesCmd.HlcTs, nodeIDStr, cmd.SetPeerRolesCmd.TargetPeerId)
-			s.handleSetPeerRolesCmd(stream.Context(), cmd.SetPeerRolesCmd, s.node.ID()) // Assuming s.node.ID() is the sender for now
+			s.handleSetPeerRolesCmd(stream.Context(), cmd.SetPeerRolesCmd, senderID)
 
 		case *clientpb.ClientMsg_UpdateRoleCmd:
 			log.Printf("Received UpdateRoleCmd (HLC: %d) from %s for role %s", cmd.UpdateRoleCmd.HlcTs, nodeIDStr, cmd.UpdateRoleCmd.Definition.Name)
-			s.handleUpdateRoleCmd(stream.Context(), cmd.UpdateRoleCmd, s.node.ID())
+			s.handleUpdateRoleCmd(stream.Context(), cmd.UpdateRoleCmd, senderID)
 
 		case *clientpb.ClientMsg_RemoveRoleCmd:
 			log.Printf("Received RemoveRoleCmd (HLC: %d) from %s for role %s", cmd.RemoveRoleCmd.HlcTs, nodeIDStr, cmd.RemoveRoleCmd.RoleName)
-			s.handleRemoveRoleCmd(stream.Context(), cmd.RemoveRoleCmd, s.node.ID())
+			s.handleRemoveRoleCmd(stream.Context(), cmd.RemoveRoleCmd, senderID)
 
 		default:
-			log.Printf("Received unhandled message type from %s", nodeIDStr)
+			log.Printf("[gRPC Recv %s] Unhandled ClientMsg payload type: %T", nodeIDStr, clientMsg.Payload)
 		}
 
+		// Check for stream context error after processing each message
 		if stream.Context().Err() != nil {
 			log.Printf("ControlStream for %s: stream context cancelled. Exiting.", nodeIDStr)
 			return stream.Context().Err()
@@ -225,9 +220,23 @@ func (s *server) publishToControlTopic(ctx context.Context, msg *clientpb.Server
 	return nil
 }
 
+// Helper to publish any ServerMsg (specifically ChatMsg) payload to the chat topic
+func (s *server) publishToChatTopic(ctx context.Context, msg *clientpb.ServerMsg) error {
+	if s.chatTopic == nil {
+		return fmt.Errorf("chat topic is nil, cannot publish chat message")
+	}
+	marshalledMsg, err := proto.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ServerMsg (ChatMsg) for chat broadcast: %w", err)
+	}
+	if err := s.chatTopic.Publish(ctx, marshalledMsg); err != nil {
+		return fmt.Errorf("failed to publish ServerMsg (ChatMsg) to chatTopic: %w", err)
+	}
+	return nil
+}
+
 // Handle incoming SetPeerRolesCmd
 func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRolesCmd, senderID peer.ID) {
-	// 1. Check if sender has permission to manage roles
 	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
 	if !senderPerms.Has(roles.PermManageUserRoles) {
 		log.Printf("Permission denied: Peer %s lacks PermManageUserRoles to set roles for %s (Cmd HLC: %d)", senderID, cmd.TargetPeerId, cmd.HlcTs)
@@ -235,28 +244,20 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 		return
 	}
 
-	// 2. Decode target peer ID and call RoleManager
-	// targetPeerID, err := peer.Decode(cmd.TargetPeerId)
-	// if err != nil {
-	// 	log.Printf("Failed to decode target peer ID '%s' for SetPeerRolesCmd: %v", cmd.TargetPeerId, err)
-	// 	return
-	// }
-
-	// assignmentMsg, err := s.roleManager.SetPeerRoles(targetPeerID, cmd.AssignedRoleNames)
-
-	// If the command's target_peer_id is the special "defaultPeerId" (or matches senderID),
-	// it means the client is trying to change its own roles (the roles of the node this service instance represents).
-	// In this case, the actual target for RoleManager is senderID (s.node.ID()).
-	actualTargetPeerID := senderID // By default, assume sender is changing their own roles.
-
-	// If cmd.TargetPeerId were a *different, valid* peer ID, we'd decode and use that.
-	// For now, since GUI sends "defaultPeerId" for self, and senderID is s.node.ID(),
-	// we use senderID as the target for RoleManager.SetPeerRoles.
-	// This block can be expanded if GUI starts sending actual other peer IDs.
+	actualTargetPeerID := senderID // Assuming GUI sends its own ID or a placeholder like "defaultPeerId" for self-change
+	// If cmd.TargetPeerId is a valid peer.ID string for another peer, decode and use it.
+	// For now, this logic assumes client wants to change ITS OWN roles.
+	if cmd.TargetPeerId != senderID.String() && cmd.TargetPeerId != "defaultPeerId" && cmd.TargetPeerId != "" {
+		decodedTarget, err := peer.Decode(cmd.TargetPeerId)
+		if err == nil {
+			actualTargetPeerID = decodedTarget
+		} else {
+			log.Printf("Warning: SetPeerRolesCmd from %s had invalid target_peer_id '%s'. Defaulting to sender.", senderID, cmd.TargetPeerId)
+		}
+	}
 
 	assignmentMsg, err := s.roleManager.SetPeerRoles(actualTargetPeerID, cmd.AssignedRoleNames)
 	if err != nil {
-		// log.Printf("Error setting peer roles for %s: %v", targetPeerID, err)
 		log.Printf("Error setting peer roles for %s: %v", actualTargetPeerID, err)
 		// Optionally send an error back to the client
 		return
@@ -264,8 +265,7 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 
 	if assignmentMsg != nil { // If there was a change
 		assignmentMsg.HlcTs = common.GetCurrentHLC() // Set HLC timestamp on the generated message
-		// log.Printf("Broadcasting PeerRoleAssignment for %s", targetPeerID)
-		log.Printf("Broadcasting PeerRoleAssignment for %s", actualTargetPeerID)
+		log.Printf("Broadcasting PeerRoleAssignment for %s with HLC %d", actualTargetPeerID, assignmentMsg.HlcTs)
 		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
 		s.hub.Broadcast(serverPayload)
 		_ = s.publishToControlTopic(ctx, serverPayload)
@@ -274,7 +274,7 @@ func (s *server) handleSetPeerRolesCmd(ctx context.Context, cmd *p2ppb.SetPeerRo
 
 func (s *server) handleUpdateRoleCmd(ctx context.Context, cmd *p2ppb.UpdateRoleCmd, senderID peer.ID) {
 	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
-	if !senderPerms.Has(roles.PermAddRemoveRoles) { // Example permission
+	if !senderPerms.Has(roles.PermAddRemoveRoles) {
 		log.Printf("Permission denied: Peer %s lacks PermAddRemoveRoles to update role definitions (Cmd HLC: %d)", senderID, cmd.HlcTs)
 		return
 	}
@@ -292,7 +292,7 @@ func (s *server) handleUpdateRoleCmd(ctx context.Context, cmd *p2ppb.UpdateRoleC
 
 	if definitionsUpdateMsg != nil {
 		definitionsUpdateMsg.HlcTs = common.GetCurrentHLC()
-		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' updated", cmd.Definition.Name)
+		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' updated, HLC %d", cmd.Definition.Name, definitionsUpdateMsg.HlcTs)
 		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: definitionsUpdateMsg}}
 		s.hub.Broadcast(serverPayload)
 		_ = s.publishToControlTopic(ctx, serverPayload)
@@ -314,7 +314,7 @@ func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleC
 
 	if definitionsUpdateMsg != nil { // Should always be non-nil on success from RemoveDefinition
 		definitionsUpdateMsg.HlcTs = common.GetCurrentHLC()
-		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' removed", cmd.RoleName)
+		log.Printf("Broadcasting RoleDefinitionsUpdate after role '%s' removed, HLC %d", cmd.RoleName, definitionsUpdateMsg.HlcTs)
 		serverPayloadDefs := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: definitionsUpdateMsg}}
 
 		s.hub.Broadcast(serverPayloadDefs)
@@ -323,7 +323,7 @@ func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleC
 
 	for _, assignmentMsg := range affectedAssignments {
 		assignmentMsg.HlcTs = common.GetCurrentHLC()
-		log.Printf("Broadcasting PeerRoleAssignment update for peer %s after role '%s' removed", assignmentMsg.PeerId, cmd.RoleName)
+		log.Printf("Broadcasting PeerRoleAssignment update for peer %s after role '%s' removed, HLC %d", assignmentMsg.PeerId, cmd.RoleName, assignmentMsg.HlcTs)
 		serverPayloadAssign := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
 
 		s.hub.Broadcast(serverPayloadAssign)
@@ -332,53 +332,92 @@ func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleC
 }
 
 // mdnsNotifee prints every peer it discovers on the LAN.
-type mdnsNotifee struct{ h host.Host }
+type mdnsNotifee struct {
+	h   host.Host
+	dht *dht.IpfsDHT
+}
 
 func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	if pi.ID == n.h.ID() {
 		return // ignore ourselves
 	}
-	log.Printf("[mDNS] discovered %s\n", pi.ID)
-	// Fire‑and‑forget dial; gossipsub attaches once the connection is up.
+	log.Printf("[mDNS] discovered %s with addrs: %v\n", pi.ID, pi.Addrs)
+
+	// Attempt to connect to the peer.
+	// DHT bootstrap will happen after connection if it's a new peer.
 	go func() {
+		log.Printf("[mDNS] Attempting to connect to %s", pi.ID)
 		if err := n.h.Connect(context.Background(), pi); err != nil {
 			log.Printf("[mDNS] dial %s failed: %v", pi.ID, err)
+		} else {
+			log.Printf("[mDNS] successfully connected to %s", pi.ID)
+			// If using DHT and connection is successful, DHT will naturally learn about this peer.
+			// Explicitly adding to DHT's peerstore might not be necessary if AutoRelay/AutoNAT services are active
+			// and the peer is routable, or if a bootstrap process runs.
 		}
 	}()
 }
 
-// buildHost sets up a real libp2p Host plus mDNS discovery.
-func buildHost(ctx context.Context) host.Host {
+// buildHost sets up a real libp2p Host plus mDNS discovery and Kademlia DHT.
+func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT) {
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(
 			"/ip4/0.0.0.0/tcp/0",
+			"/ip4/0.0.0.0/udp/0/quic",
 			"/ip6/::/tcp/0",
+			"/ip6/::/udp/0/quic",
 		),
+		libp2p.EnableNATService(),
+		libp2p.EnableRelay(),        // Enable p2p-circuit relay (both client and server)
+		libp2p.EnableHolePunching(), // Enable hole punching
 	)
 	if err != nil {
 		log.Fatalf("libp2p host init failed: %v", err)
 	}
 
+	// Initialize Kademlia DHT in server mode.
+	// BootstrapPeers are usually hardcoded or discovered through other means (e.g., mDNS for local, then expanding).
+	// For LAN, mDNS might be sufficient to find initial peers.
+	kademliaDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer))
+	if err != nil {
+		log.Fatalf("Kademlia DHT init failed: %v", err)
+	}
+
 	// mDNS for zero-conf LAN discovery
-	mdnsSvc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{h: h})
+	// Pass DHT to notifee if it needs to interact with it (e.g., add discovered peers)
+	mdnsSvc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{h: h, dht: kademliaDHT})
 	if err := mdnsSvc.Start(); err != nil {
 		log.Fatalf("mDNS start failed: %v", err)
 	}
 
-	return h
+	// Bootstrap the DHT. In a real-world scenario, this would connect to predefined bootstrap nodes.
+	// For LAN, we can rely on mDNS to find some initial peers, and then DHT can discover more.
+	// Or, if you have known bootstrap peers on the LAN, add them here.
+	if err = kademliaDHT.Bootstrap(ctx); err != nil {
+		log.Printf("DHT bootstrap failed: %v (continuing, will rely on mDNS/connections)", err)
+		// Don't fatal, as for LAN, mDNS might connect peers and DHT can build from there.
+	}
+
+	log.Printf("Libp2p Host created with ID: %s", h.ID().String())
+	for _, addr := range h.Addrs() {
+		log.Printf("Listening on address: %s/p2p/%s", addr, h.ID().String())
+	}
+
+	return h, kademliaDHT
 }
 
 // processControlTopicMessages handles all incoming ServerMsg messages from the ctrlTopic.
-func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, qc *p2p.QueueController, rm *roles.RoleManager, myID peer.ID, localHub *p2p.Hub, node *p2p.Node) {
-	log.Println("[gossip] processControlTopicMessages started for peer", myID)
+func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv *server) {
+	myID := srv.node.ID()
+	log.Println("[gossip Ctrl] processControlTopicMessages started for peer", myID)
 	for {
 		msg, err := sub.Next(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Println("[gossip] pumpQueueUpdates: context cancelled, exiting.")
+				log.Println("[gossip Ctrl] pumpQueueUpdates: context cancelled, exiting.")
 				return
 			}
-			log.Printf("[gossip] processControlTopicMessages: subscription error: %v", err)
+			log.Printf("[gossip Ctrl] processControlTopicMessages: subscription error: %v", err)
 			return // Exit on other errors too for simplicity
 		}
 
@@ -388,84 +427,120 @@ func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, 
 
 		var serverMsg clientpb.ServerMsg
 		if err := proto.Unmarshal(msg.Data, &serverMsg); err != nil {
-			log.Printf("[gossip] processControlTopicMessages: failed to unmarshal ServerMsg from %s: %v", msg.ReceivedFrom, err)
+			log.Printf("[gossip Ctrl] processControlTopicMessages: failed to unmarshal ServerMsg from %s: %v", msg.ReceivedFrom, err)
 			continue
 		}
 
 		switch payload := serverMsg.GetPayload().(type) {
 		case *clientpb.ServerMsg_QueueUpdate:
-			handleGossipQueueUpdate(payload.QueueUpdate, msg.ReceivedFrom, qc, rm, localHub, node)
+			handleGossipQueueUpdate(payload.QueueUpdate, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_RoleDefinitionsUpdate:
-			handleGossipRoleDefinitionsUpdate(payload.RoleDefinitionsUpdate, msg.ReceivedFrom, rm, localHub, node, qc)
+			handleGossipRoleDefinitionsUpdate(payload.RoleDefinitionsUpdate, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_PeerRoleAssignment:
-			handleGossipPeerRoleAssignment(payload.PeerRoleAssignment, msg.ReceivedFrom, rm, localHub, node, qc, myID)
+			handleGossipPeerRoleAssignment(payload.PeerRoleAssignment, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_AllPeerRoleAssignments:
-			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, rm, localHub, node, qc)
+			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_PlaybackStateCmd:
-			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, localHub)
+			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, srv.hub)
 		default:
-			log.Printf("[gossip] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
+			log.Printf("[gossip Ctrl] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
 		}
 	}
 }
 
-func handleGossipQueueUpdate(update *p2ppb.QueueUpdate, from peer.ID, qc *p2p.QueueController, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node) {
-	log.Printf("[gossip] handleGossipQueueUpdate: received from %s (HLC: %d)", from, update.HlcTs)
-	qc.ApplyUpdate(update, hub, node, rm) // ApplyUpdate in QC needs rm for ReactToQueueUpdate
+// processChatTopicMessages handles incoming ChatMsg messages from the chatTopic.
+func processChatTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv *server) {
+	myID := srv.node.ID()
+	log.Println("[gossip Chat] processChatTopicMessages started for peer", myID)
+	for {
+		msg, err := sub.Next(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Println("[gossip Chat] context cancelled, exiting chat message processor.")
+				return
+			}
+			log.Printf("[gossip Chat] subscription error: %v", err)
+			return
+		}
+
+		if msg.ReceivedFrom == myID {
+			continue // Skip messages broadcast by self
+		}
+
+		var serverMsg clientpb.ServerMsg
+		if err := proto.Unmarshal(msg.Data, &serverMsg); err != nil {
+			log.Printf("[gossip Chat] failed to unmarshal ServerMsg (expecting ChatMsg) from %s: %v", msg.ReceivedFrom, err)
+			continue
+		}
+
+		if chatPayload, ok := serverMsg.GetPayload().(*clientpb.ServerMsg_ChatMsg); ok {
+			log.Printf("[gossip ChatRecv] Received ChatMsg (ID: %s, Sender: %s, Text: '%.20s...', HLC: %d) from %s. Broadcasting to local hub.",
+				chatPayload.ChatMsg.MessageId, chatPayload.ChatMsg.Sender, chatPayload.ChatMsg.Text, chatPayload.ChatMsg.HlcTs, msg.ReceivedFrom)
+			// Forward the *entire* ServerMsg (which wraps ChatMsg) to local GUI clients
+			srv.hub.Broadcast(&serverMsg)
+		} else {
+			log.Printf("[gossip Chat] received non-ChatMsg payload on chat topic from %s: %T", msg.ReceivedFrom, serverMsg.GetPayload())
+		}
+	}
 }
 
-func handleGossipRoleDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate, from peer.ID, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node, qc *p2p.QueueController) {
-	log.Printf("[gossip] handleGossipRoleDefinitionsUpdate: received from %s (HLC: %d)", from, update.HlcTs)
-	if err := rm.ApplyDefinitionsUpdate(update); err != nil {
-		log.Printf("[gossip] Error applying RoleDefinitionsUpdate from %s: %v", from, err)
+func handleGossipQueueUpdate(update *p2ppb.QueueUpdate, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipQueueUpdate: received from %s (HLC: %d)", from, update.HlcTs)
+	srv.queueCtrl.ApplyUpdate(update, srv.hub, srv.node, srv.roleManager)
+}
+
+func handleGossipRoleDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipRoleDefinitionsUpdate: received from %s (HLC: %d)", from, update.HlcTs)
+	if err := srv.roleManager.ApplyDefinitionsUpdate(update); err != nil {
+		log.Printf("[gossip Ctrl] Error applying RoleDefinitionsUpdate from %s: %v", from, err)
 	} else {
 		// Successfully applied. Notify local GUI clients about the change in definitions.
-		log.Printf("[gossip] Applied RoleDefinitionsUpdate from %s. Broadcasting to local hub.", from)
+		log.Printf("[gossip Ctrl] Applied RoleDefinitionsUpdate from %s. Broadcasting to local hub.", from)
 		serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_RoleDefinitionsUpdate{RoleDefinitionsUpdate: update}}
-		hub.Broadcast(serverMsg)
+		srv.hub.Broadcast(serverMsg)
 		// Note: Applying new definitions might change effective permissions for *many* peers.
 		// A more advanced system might re-evaluate and broadcast individual PeerRoleAssignments
 		// if effective permissions changed, or simply expect clients to re-calculate.
 		// For now, also re-evaluate this node's runner state as its permissions might have changed.
 		// This is a broad action; finer-grained reactions could be implemented.
-		if node != nil && qc != nil { // qc needed by ReactToQueueUpdate
-			node.ReactToQueueUpdate(qc, rm)
+		if srv.node != nil && srv.queueCtrl != nil {
+			srv.node.ReactToQueueUpdate()
 		}
 	}
 }
 
-func handleGossipPeerRoleAssignment(assignment *p2ppb.PeerRoleAssignment, from peer.ID, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node, qc *p2p.QueueController, myID peer.ID) {
-	log.Printf("[gossip] handleGossipPeerRoleAssignment: for peer %s from %s (HLC: %d)", assignment.PeerId, from, assignment.HlcTs)
+func handleGossipPeerRoleAssignment(assignment *p2ppb.PeerRoleAssignment, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipPeerRoleAssignment: for peer %s from %s (HLC: %d)", assignment.PeerId, from, assignment.HlcTs)
 	targetPeerID, err := peer.Decode(assignment.PeerId)
 	if err != nil {
-		log.Printf("[gossip] Invalid peer ID '%s' in PeerRoleAssignment from %s: %v", assignment.PeerId, from, err)
+		log.Printf("[gossip Ctrl] Invalid peer ID '%s' in PeerRoleAssignment from %s: %v", assignment.PeerId, from, err)
 		return
 	}
-	changed, err := rm.ApplyPeerAssignment(targetPeerID, assignment.AssignedRoleNames, assignment.HlcTs)
+	changed, err := srv.roleManager.ApplyPeerAssignment(targetPeerID, assignment.AssignedRoleNames, assignment.HlcTs)
 	if err != nil {
-		log.Printf("[gossip] Error applying PeerRoleAssignment for %s from %s: %v", targetPeerID, from, err)
+		log.Printf("[gossip Ctrl] Error applying PeerRoleAssignment for %s from %s: %v", targetPeerID, from, err)
 	} else if changed {
-		log.Printf("[gossip] Applied PeerRoleAssignment for %s from %s.", targetPeerID, from)
+		log.Printf("[gossip Ctrl] Applied PeerRoleAssignment for %s from %s.", targetPeerID, from)
 		// Notify local GUI about this specific assignment change
 		serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignment}}
-		hub.Broadcast(serverMsg)
-		if targetPeerID == myID && node != nil && qc != nil { // If this node's roles changed
-			log.Printf("[gossip] Own roles changed due to PeerRoleAssignment from %s. Re-evaluating runner.", from)
-			node.ReactToQueueUpdate(qc, rm)
+		srv.hub.Broadcast(serverMsg)
+		if targetPeerID == srv.node.ID() && srv.node != nil && srv.queueCtrl != nil {
+			log.Printf("[gossip Ctrl] Own roles changed due to PeerRoleAssignment from %s. Re-evaluating runner.", from)
+			srv.node.ReactToQueueUpdate()
 		}
 	}
 }
 
-func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, from peer.ID, rm *roles.RoleManager, hub *p2p.Hub, node *p2p.Node, qc *p2p.QueueController) {
-	log.Printf("[gossip] handleGossipAllPeerRoleAssignments: received from %s (HLC: %d)", from, snapshot.HlcTs)
-	if err := rm.ApplyAllAssignmentsSnapshot(snapshot); err != nil {
-		log.Printf("[gossip] Error applying AllPeerRoleAssignments from %s: %v", from, err)
+func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipAllPeerRoleAssignments: received from %s (HLC: %d)", from, snapshot.HlcTs)
+	if err := srv.roleManager.ApplyAllAssignmentsSnapshot(snapshot); err != nil {
+		log.Printf("[gossip Ctrl] Error applying AllPeerRoleAssignments from %s: %v", from, err)
 	} else {
-		log.Printf("[gossip] Applied AllPeerRoleAssignments from %s. Broadcasting to local hub and re-evaluating runner.", from)
+		log.Printf("[gossip Ctrl] Applied AllPeerRoleAssignments from %s. Broadcasting to local hub and re-evaluating runner.", from)
 		serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_AllPeerRoleAssignments{AllPeerRoleAssignments: snapshot}}
-		hub.Broadcast(serverMsg)
-		if node != nil && qc != nil {
-			node.ReactToQueueUpdate(qc, rm)
+		srv.hub.Broadcast(serverMsg)
+		if srv.node != nil && srv.queueCtrl != nil {
+			srv.node.ReactToQueueUpdate()
 		}
 	}
 }
@@ -488,7 +563,11 @@ func (s *server) processSegmentEvents(ctx context.Context, rb *media.RingBuffer)
 		case <-ctx.Done():
 			log.Println("[SegmentProcessor] Context cancelled, stopping segment event processor.")
 			return
-		case event := <-eventChan:
+		case event, ok := <-eventChan:
+			if !ok {
+				log.Println("[SegmentProcessor] Segment event channel closed. Stopping.")
+				return
+			}
 			// This node's ffmpeg produced a segment and it landed in the RingBuffer.
 			// Decision Q2: "Only owner peer runs ffmpeg locally" implies this node IS the streamer.
 			// We still do a sanity check against roles and queue state.
@@ -497,6 +576,11 @@ func (s *server) processSegmentEvents(ctx context.Context, rb *media.RingBuffer)
 			if headOk {
 				localPeerID := s.node.ID()
 				permissions := s.roleManager.GetPermissionsForPeer(localPeerID)
+
+				// Check if the current node is the one designated to store and stream THIS item
+				// AND if the sequence number from the event matches what's expected for this stream.
+				// The latter check is complex if seqBase is not perfectly synced, so for now,
+				// primarily rely on StoredBy and PermStream.
 				if headItem.StoredBy == localPeerID && permissions.Has(roles.PermStream) {
 					// Optional: More detailed check if event.Seq aligns with expected sequence for headItem
 					// and if headItem.FilePath matches the one EncoderRunner is using.
@@ -505,7 +589,7 @@ func (s *server) processSegmentEvents(ctx context.Context, rb *media.RingBuffer)
 			}
 
 			if !isDesignatedStreamer {
-				log.Printf("[SegmentProcessor] Segment %d from local RingBuffer, but node (%s) is not designated streamer. NOT publishing.", event.Seq, s.node.ID())
+				log.Printf("[SegmentProcessor] Segment %d from local RingBuffer, but node (%s) is not designated streamer for current head. NOT publishing.", event.Seq, s.node.ID())
 				continue
 			}
 
@@ -526,7 +610,11 @@ func (s *server) processSegmentEvents(ctx context.Context, rb *media.RingBuffer)
 			}
 
 			if videoTopic := s.node.VideoTopic(); videoTopic != nil {
-				if err := videoTopic.Publish(context.Background(), marshalledVideoMsg); err != nil { // Using context.Background for publish from this long-running goroutine
+				if err := videoTopic.Publish(ctx, marshalledVideoMsg); err != nil {
+					if ctx.Err() != nil {
+						log.Printf("[gossip VideoPublish] Context error publishing video segment %d: %v", event.Seq, ctx.Err())
+						return // Exit if context is done
+					}
 					log.Printf("[gossip VideoPublish] Failed to publish video segment %d: %v", event.Seq, err)
 				} else {
 					log.Printf("[gossip VideoPublish] Published video segment %d (%d bytes) via event processor", event.Seq, len(segmentData))
@@ -575,7 +663,7 @@ func (s *server) processVideoSegmentMessages(ctx context.Context, sub *pubsub.Su
 		// to prevent re-publishing them if this node *also* happens to be the streamer
 		// (though that's less likely if only one streamer, but good for safety).
 		rb.SetPublishEvents(false)
-		rb.WriteAt(videoSegment.SequenceNumber, videoSegment.Data, 0 /*pts placeholder*/)
+		rb.WriteAt(videoSegment.SequenceNumber, videoSegment.Data, 0)
 		rb.SetPublishEvents(true) // Re-enable for segments from local ffmpeg
 
 		log.Printf("[gossip VideoReceive] Received and stored video segment %d (%d bytes) from %s.", videoSegment.SequenceNumber, len(videoSegment.Data), msg.ReceivedFrom)
@@ -587,7 +675,12 @@ func main() {
 	// flags
 	var grpcPort int
 	flag.IntVar(&grpcPort, "grpc-port", 0, "gRPC listen port")
+	var initialRolesStr string
+	flag.StringVar(&initialRolesStr, "roles", "Admin", "Initial roles for this node (comma-separated, e.g., 'Streamer,Viewer')")
 	flag.Parse()
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx() // Ensure cancellation on exit
 
 	// 1) Start HTTP mini-HLS on a random port
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -599,7 +692,6 @@ func main() {
 
 	// --- mini‑HLS in‑RAM buffer ---
 	rb := media.NewRingBuffer(120) // 120 s window
-	statusCh := media.StartStatusTicker(rb, 5*time.Second)
 	plH, segH, triggerDiscontinuity := media.Handler(rb)
 
 	httpMux := http.NewServeMux()
@@ -614,7 +706,7 @@ func main() {
 			http.NotFound(w, r)
 		}
 	})
-	httpServer := &http.Server{Addr: httpLn.Addr().String(), Handler: httpMux}
+	httpServer := &http.Server{Handler: httpMux}
 
 	// Goroutine to start the HLS server
 	go func() {
@@ -626,31 +718,52 @@ func main() {
 	}()
 
 	// 2) Start gRPC server
+	if grpcPort == 0 { // If port 0 was passed, pick a free one
+		tempLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			log.Fatalf("Failed to find free port for gRPC: %v", err)
+		}
+		grpcPort = tempLn.Addr().(*net.TCPAddr).Port
+		tempLn.Close() // Close it, we'll listen on it properly soon
+	}
+
 	grpcLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", grpcPort))
 	if err != nil {
-		log.Fatalf("gRPC listen failed: %v", err)
+		log.Fatalf("gRPC listen on port %d failed: %v", grpcPort, err)
 	}
+	log.Printf("gRPC server listening on 127.0.0.1:%d\n", grpcPort)
+
 	grpcServer := grpc.NewServer()
-	hub := p2p.NewHub()
-	queueCtrl := p2p.NewQueueController()
-	roleManager := roles.NewRoleManager()
 
 	// 3) libp2p + GossipSub
-
-	ctx, cancelCtx := context.WithCancel(context.Background())
-
-	lhost := buildHost(ctx)
-	node := p2p.NewNode(lhost, hlsPort)
+	lhost, _ := buildHost(ctx) // DHT not directly used by server instance for now
+	node := p2p.NewNode(lhost, hlsPort, rb)
+	hub := p2p.NewHub()
+	queueCtrl := p2p.NewQueueController(triggerDiscontinuity)
+	roleManager := roles.NewRoleManager()
 
 	// Assign default roles (e.g., "Admin" or "Streamer,Viewer") to the service's own node ID
 	// This allows the service itself (when acting as sender) to have permissions.
 	// For testing self-role changes via GUI, it needs PermManageUserRoles if target is self.
 	// Giving Admin role to self for now for full testing capability.
-	_, err = roleManager.SetPeerRoles(node.ID(), []string{"Admin"}) // Assign "Admin" to self
+	parsedInitialRoles, err := roleManager.ParseRoleNames(initialRolesStr)
 	if err != nil {
-		log.Fatalf("Failed to set initial self-roles for service node: %v", err)
+		log.Fatalf("Invalid initial roles string '%s': %v", initialRolesStr, err)
 	}
-	log.Printf("Service node %s initialized with Admin role in RoleManager.", node.ID())
+	if len(parsedInitialRoles) > 0 {
+		roleNames := make([]string, len(parsedInitialRoles))
+		for i, r := range parsedInitialRoles {
+			roleNames[i] = r.Name // Use the (potentially normalized) name from parsed Role struct
+		}
+		_, err = roleManager.SetPeerRoles(node.ID(), roleNames)
+		if err != nil {
+			log.Fatalf("Failed to set initial self-roles for service node: %v", err)
+		}
+		log.Printf("Service node %s initialized with roles: %v in RoleManager.", node.ID(), roleNames)
+	} else {
+		log.Printf("Service node %s initialized with no specific roles from command line.", node.ID())
+	}
+	node.SetDependencies(queueCtrl, roleManager, hub) // Inject dependencies into Node
 
 	ps, err := pubsub.NewGossipSub(ctx, lhost)
 	if err != nil {
@@ -672,37 +785,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("ctrl topic subscribe: %v", err)
 	}
-	go processControlTopicMessages(ctx, subCtrl, queueCtrl, roleManager, lhost.ID(), hub, node)
 
-	//  Peer‑connected / peer‑lost trace
-	sub, err := lhost.EventBus().Subscribe(
-		[]interface{}{new(event.EvtPeerConnectednessChanged)})
-	if err != nil {
+	if _, err := lhost.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged)); err != nil {
 		log.Fatalf("event‑bus subscribe failed: %v", err)
 	}
-	go func() {
-		for ev := range sub.Out() {
-			e := ev.(event.EvtPeerConnectednessChanged)
-			switch e.Connectedness {
-			case network.Connected:
-				log.Printf("[conn] ✔ peer connected: %s", e.Peer)
-			case network.NotConnected:
-				log.Printf("[conn] ✖ peer lost: %s", e.Peer)
-			default:
-				log.Printf("[conn] ↻ peer %s changed: %v", e.Peer, e.Connectedness)
-			}
-		}
-	}()
 
 	// clientpb.RegisterP2PTClientServer(grpcServer, &server{
 	// Define the server instance that holds all dependencies
 	srvInstance := &server{
-		hlsPort:     hlsPort,
-		hub:         hub,
-		queueCtrl:   queueCtrl,
-		node:        node,
-		roleManager: roleManager,
-		ctrlTopic:   ctrlTopic,
+		hlsPort:                 hlsPort,
+		hub:                     hub,
+		queueCtrl:               queueCtrl,
+		node:                    node,
+		roleManager:             roleManager,
+		ctrlTopic:               ctrlTopic,
+		chatTopic:               chatTopic,
+		triggerHLSDircontinuity: triggerDiscontinuity,
 	}
 	clientpb.RegisterP2PTClientServer(grpcServer, srvInstance)
 
@@ -710,32 +808,75 @@ func main() {
 	if err != nil {
 		log.Fatalf("video topic subscribe for receiving failed: %v", err)
 	}
-	go srvInstance.processVideoSegmentMessages(ctx, subVideo, rb) // srvInstance has node, roleManager
 
-	// Start the segment event processor goroutine
+	// Start background processors
+	go processControlTopicMessages(ctx, subCtrl, srvInstance)
+
+	// Chat topic subscription
+	subChat, err := chatTopic.Subscribe()
+	if err != nil {
+		log.Fatalf("Chat topic subscribe failed: %v", err)
+	}
+	go processChatTopicMessages(ctx, subChat, srvInstance) // New goroutine for chat
+
+	// Video topic subscription (for receiving segments)
+	go srvInstance.processVideoSegmentMessages(ctx, subVideo, rb)
+
+	// Segment event processor (for publishing segments from local encoder)
 	go srvInstance.processSegmentEvents(ctx, rb)
 
 	// fan‑out StreamStatus to every connected client
+	statusCh := media.StartStatusTicker(rb, 5*time.Second) // Assuming this returns chan *p2ppb.StreamStatus
 	go func() {
-		for st := range statusCh {
-			hub.Broadcast(&clientpb.ServerMsg{
-				Payload: &clientpb.ServerMsg_StreamStatus{StreamStatus: st},
-			})
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case st, ok := <-statusCh:
+				if !ok {
+					return
+				} // Channel closed
+				srvInstance.hub.Broadcast(&clientpb.ServerMsg{
+					Payload: &clientpb.ServerMsg_StreamStatus{StreamStatus: st},
+				})
+			}
+		}
+	}()
+
+	// Libp2p connection event logger
+	connSub, _ := lhost.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged))
+	go func() {
+		defer connSub.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-connSub.Out():
+				if !ok {
+					return
+				}
+				e := ev.(event.EvtPeerConnectednessChanged)
+				log.Printf("[conn] Peer %s: %s", e.Peer, e.Connectedness)
+			}
 		}
 	}()
 
 	// Goroutine to start the gRPC server
 	go func() {
 		log.Printf("gRPC server listening on %s\n", grpcLn.Addr().String())
-		if err := grpcServer.Serve(grpcLn); err != nil {
-			// Log non-fatal error if Serve returns after GracefulStop
-			// Example error string: "grpc: the server has been stopped"
-			if err.Error() != "grpc: the server has been stopped" {
-				log.Printf("gRPC serve failed: %v", err)
-			}
+		if err := grpcServer.Serve(grpcLn); err != nil && err.Error() != "grpc: the server has been stopped" {
+			log.Printf("gRPC serve failed: %v", err) // Log as non-fatal if already stopping
 		}
-		log.Println("gRPC server goroutine finished.") // Add log
 	}()
+
+	// Trigger initial ReactToQueueUpdate to start encoder if applicable
+	// Needs to be after all dependencies are set up.
+	// A small delay might be useful if there's any race with topic subscriptions,
+	// though usually not necessary for local logic.
+	time.AfterFunc(1*time.Second, func() {
+		log.Println("Triggering initial ReactToQueueUpdate.")
+		srvInstance.node.ReactToQueueUpdate()
+	})
 
 	// 4) Graceful shutdown handling
 	stopChan := make(chan os.Signal, 1)
@@ -753,21 +894,19 @@ func main() {
 	grpcServer.Stop()                            // Force immediate stop
 	log.Println("gRPC server Stop() completed.") // Log completion
 
-	_ = triggerDiscontinuity // (future use when swapping streamers)
-
 	// Shutdown HTTP server
 	log.Println("Attempting HTTP server Shutdown()...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
+	shutdownCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer httpCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
 	} else {
 		log.Println("HTTP server shutdown complete.")
 	}
 
-	// Add a small delay to see if goroutines finish and logs appear
-	log.Println("Waiting briefly before final exit...")
-	time.Sleep(2 * time.Second)
-
+	if err := lhost.Close(); err != nil {
+		log.Printf("Error closing libp2p host: %v", err)
+	}
+	log.Println("Libp2p host closed.")
 	log.Println("Peer service exited gracefully.")
 }

@@ -4,19 +4,23 @@ package media
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 )
 
 // Handler returns two ready‑to‑use mux handlers:
 //   - /stream.m3u8  – rolling playlist
-//   - /seg_123.ts   – raw MPEG‑TS segment
+//   - /seg_XXX.ts   – raw MPEG‑TS segment
+//
+// It also returns a function to trigger a discontinuity.
 func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFunc, triggerDiscontinuity func()) {
 	// pendingDiscont is set true by triggerDiscontinuity and reset after emitting
 	var pendingDiscont bool
 
 	// triggerDiscontinuity tells the playlist to emit an EXT-X-DISCONTINUITY tag
 	triggerDiscontinuity = func() {
+		log.Println("[HLS Handler] Discontinuity triggered.")
 		pendingDiscont = true
 	}
 

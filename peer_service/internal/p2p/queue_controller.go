@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+
+	"peer_service/internal/common"
 	"peer_service/internal/roles"
 	clientpb "peer_service/proto"
 	p2ppb "peer_service/proto/p2p"
@@ -14,10 +16,16 @@ import (
 )
 
 type QueueController struct {
-	q *Queue
+	q                    *Queue
+	triggerDiscontinuity func() // Function to call for HLS discontinuity
 }
 
-func NewQueueController() *QueueController { return &QueueController{q: NewQueue()} }
+func NewQueueController(triggerDisc func()) *QueueController {
+	return &QueueController{
+		q:                    NewQueue(),
+		triggerDiscontinuity: triggerDisc,
+	}
+}
 
 // Q returns the underlying queue. Used for read-only operations like checking head.
 func (qc *QueueController) Q() *Queue {
@@ -43,12 +51,18 @@ func (qc *QueueController) Snapshot() *clientpb.ServerMsg {
 // Handle processes a queue command, mutates the queue, and notifies local/remote clients.
 // It is called when a local gRPC client sends a QueueCmd.
 // It uses the RoleManager to check permissions.
-// The `ctrlTopic` is for publishing the update via GossipSub.
 func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, sender peer.ID, rm *roles.RoleManager, hub *Hub, node *Node, ctrlTopic *pubsub.Topic) error {
-	perms := rm.GetPermissionsForPeer(sender) // Get permissions for the sender
-	if !perms.Has(roles.PermQueue) {
-		return fmt.Errorf("permission denied: missing Queue perm")
+	// Permission check for user-initiated commands
+	isInternalNext := cmd.Type == p2ppb.QueueCmd_NEXT && sender == node.ID() // Check if it's an internal NEXT
+	if !isInternalNext {
+		perms := rm.GetPermissionsForPeer(sender)
+		if !perms.Has(roles.PermQueue) {
+			return fmt.Errorf("permission denied: peer %s missing Queue perm for cmd type %s", sender, cmd.Type)
+		}
 	}
+
+	madeChange := false
+	currentHeadBeforeChange, _ := qc.q.HeadNoLock()
 
 	switch cmd.Type {
 	case p2ppb.QueueCmd_APPEND:
@@ -58,37 +72,79 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 			AddedBy:  sender,
 			HlcTs:    cmd.HlcTs,
 		})
+		madeChange = true
 	case p2ppb.QueueCmd_REMOVE:
-		qc.q.Remove(int(cmd.Index))
+		if qc.q.Remove(int(cmd.Index)) {
+			madeChange = true
+		}
 	case p2ppb.QueueCmd_CLEAR:
 		qc.q.Clear()
-	case p2ppb.QueueCmd_NEXT:
-		qc.q.PopHead()
+		madeChange = true
+		// After clearing, the current streamer (if any) should stop.
+		node.StopCurrentEncoder() // Explicitly stop encoder.
+	case p2ppb.QueueCmd_NEXT: // Typically server-initiated after EOF
+		if qc.triggerDiscontinuity != nil {
+			log.Printf("QueueController: Triggering HLS discontinuity (with RingBuffer reset to Node's next expected seq) for NEXT command.")
+			qc.triggerDiscontinuity()
+		}
+		if qc.q.PopHead() { // PopHead returns true if an item was popped
+			madeChange = true
+		} else {
+			log.Println("QueueController: NEXT called on empty or single-item queue, no change after pop.")
+			// If queue becomes empty, ensure encoder stops
+			node.StopCurrentEncoder()
+		}
+	case p2ppb.QueueCmd_SKIP_NEXT: // User-initiated skip
+		// Permission already checked if not internal.
+		if qc.triggerDiscontinuity != nil {
+			log.Printf("QueueController: Triggering HLS discontinuity (with RingBuffer reset to Node's next expected seq) for SKIP_NEXT command.")
+			qc.triggerDiscontinuity()
+		}
+		// Stop the current encoder *before* popping the head,
+		// so ReactToQueueUpdate doesn't try to restart it for the item being skipped.
+		node.StopCurrentEncoder()
+
+		if qc.q.PopHead() {
+			madeChange = true
+		} else {
+			log.Println("QueueController: SKIP_NEXT called on empty or single-item queue, no change after pop.")
+		}
+	default:
+		return fmt.Errorf("unknown QueueCmd type: %v", cmd.Type)
 	}
 
-	// After any successful mutation:
-	// 1. Notify local GUI client(s) via Hub
-	snapshotMsg := qc.Snapshot()
-	if hub != nil {
-		hub.Broadcast(snapshotMsg)
-	}
+	if madeChange {
+		newHeadAfterChange, newHeadOk := qc.q.HeadNoLock()
+		logMsg := fmt.Sprintf("QueueController: Queue changed due to %s cmd from %s.", cmd.Type, sender)
+		if newHeadOk {
+			logMsg += fmt.Sprintf(" Old head: %s, New head: %s.", currentHeadBeforeChange.FilePath, newHeadAfterChange.FilePath)
+		}
+		log.Println(logMsg)
+		snapshotMsg := qc.Snapshot() // Get the *clientpb.ServerMsg
+		// Add HLC to the QueueUpdate payload itself
+		if quPayload, ok := snapshotMsg.GetPayload().(*clientpb.ServerMsg_QueueUpdate); ok {
+			quPayload.QueueUpdate.HlcTs = common.GetCurrentHLC() // Set HLC for the update event
+		}
 
-	// 2. Publish the QueueUpdate over GossipSub
-	if ctrlTopic != nil {
-		if marshalledServerMsg, err := proto.Marshal(snapshotMsg); err != nil {
-			log.Printf("[gossip] Handle: marshal ServerMsg{QueueUpdate} failed: %v", err)
-		} else if err := ctrlTopic.Publish(ctx, marshalledServerMsg); err != nil {
-			// Check context error for Publish
-			if ctx.Err() != nil {
-				log.Printf("[gossip] Handle: context error during publish ServerMsg{QueueUpdate}: %v", ctx.Err())
-			} else {
-				log.Printf("[gossip] Handle: publish ServerMsg{QueueUpdate} failed: %v", err)
+		if hub != nil {
+			hub.Broadcast(snapshotMsg)
+		}
+		if ctrlTopic != nil {
+			if marshalledServerMsg, err := proto.Marshal(snapshotMsg); err != nil {
+				log.Printf("[gossip QC.Handle] marshal ServerMsg{QueueUpdate} failed: %v", err)
+			} else if err := ctrlTopic.Publish(ctx, marshalledServerMsg); err != nil {
+				if ctx.Err() != nil {
+					log.Printf("[gossip QC.Handle] context error during publish ServerMsg{QueueUpdate}: %v", ctx.Err())
+				} else {
+					log.Printf("[gossip QC.Handle] publish ServerMsg{QueueUpdate} failed: %v", err)
+				}
 			}
 		}
 	}
 
-	// 3. Trigger queue-to-runner glue logic
-	node.ReactToQueueUpdate(qc, rm)
+	// Always call ReactToQueueUpdate, even if no change from this specific command,
+	// as other state (like permissions) might have changed, or an empty queue still needs handling.
+	node.ReactToQueueUpdate()
 	return nil
 }
 
@@ -96,6 +152,11 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 // This is called when a QueueUpdate is received from GossipSub.
 // node and rm are passed to facilitate calling ReactToQueueUpdate.
 func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub, node *Node, rm *roles.RoleManager) {
+	// TODO: Implement HLC check for the update message itself (update.HlcTs)
+	//       against a locally stored HLC for the last applied queue update.
+	//       For now, always apply.
+	log.Printf("QueueController.ApplyUpdate: Applying full queue update with HLC %d. Items: %d", update.HlcTs, len(update.Items))
+
 	newItems := make([]QueueItem, 0, len(update.Items))
 	for _, pbItem := range update.Items {
 		storedByID, errStored := peer.Decode(pbItem.StoredBy)
@@ -117,10 +178,14 @@ func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub,
 	}
 	qc.q.ReplaceItems(newItems)
 
-	if localHub != nil { // Notify local GUI client about the change
-		localHub.Broadcast(qc.Snapshot())
+	if localHub != nil {
+		snapshotMsg := qc.Snapshot()
+		// Update the HLC on the snapshot payload to reflect this event's time
+		if quPayload, ok := snapshotMsg.GetPayload().(*clientpb.ServerMsg_QueueUpdate); ok {
+			quPayload.QueueUpdate.HlcTs = common.GetCurrentHLC()
+		}
+		localHub.Broadcast(snapshotMsg)
 	}
 
-	// Trigger queue-to-runner glue
-	node.ReactToQueueUpdate(qc, rm)
+	node.ReactToQueueUpdate()
 }

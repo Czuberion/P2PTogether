@@ -8,8 +8,9 @@ message QueueCmd {
   enum Type {
     APPEND = 0;
     REMOVE = 1;
-    NEXT = 2;
+    NEXT = 2; // Typically server-initiated after EOF
     CLEAR = 3;
+    SKIP_NEXT = 4; // User-initiated skip
   }
   Type type = 1;
   string file_path = 2; // meaningful only for APPEND

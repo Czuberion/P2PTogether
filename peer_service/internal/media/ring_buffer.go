@@ -41,7 +41,7 @@ type RingBuffer struct {
 // NewRingBuffer returns a buffer that holds window seconds of video.
 // window MUST be a multiple of 2 s. Example: NewRingBuffer(120) → 60 slots.
 func NewRingBuffer(windowSeconds int) *RingBuffer {
-	if windowSeconds%2 != 0 || windowSeconds <= 0 {
+	if windowSeconds%(int(SegmentDuration.Seconds())) != 0 || windowSeconds <= 0 {
 		panic("ring_buffer: windowSeconds must be a positive multiple of 2")
 	}
 	return &RingBuffer{
@@ -134,9 +134,12 @@ func (rb *RingBuffer) Get(seq uint32) []byte {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 
+	log.Printf("[RingBuffer.Get] Requesting seq=%d. Current baseSeq=%d, nextSeq=%d", seq, rb.baseSeq, rb.nextSeq)
 	if idx := rb.idxFor(seq); idx >= 0 {
+		log.Printf("[RingBuffer.Get] Found seq=%d at index=%d. Data len: %d", seq, idx, len(rb.buf[idx].Data))
 		return rb.buf[idx].Data
 	}
+	log.Printf("[RingBuffer.Get] seq=%d not found (out of range or not yet written).", seq)
 	return nil
 }
 
@@ -175,4 +178,12 @@ func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64) {
 			log.Printf("RingBuffer: SegmentEventChan full, dropping event for seq %d", seq)
 		}
 	}
+}
+
+// GetNextSeq returns the next sequence number that should be used for a new segment.
+// This is typically used to determine the -start_number for a new ffmpeg instance.
+func (rb *RingBuffer) GetNextSeq() uint32 {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	return rb.nextSeq
 }

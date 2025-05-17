@@ -3,6 +3,7 @@ package media
 
 import (
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ func IngestHandler(rb *RingBuffer) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+		log.Printf("[IngestHandler] Received segment via PUT: seq=%d, path=%s", seq, r.URL.Path)
 
 		// Read the whole segment (≤ ~1 MiB for 2 s 720p).
 		data, err := io.ReadAll(r.Body)
@@ -45,6 +47,7 @@ func IngestHandler(rb *RingBuffer) http.HandlerFunc {
 
 		// honour the incoming segment number
 		rb.WriteAt(uint32(seq), data, 0 /*pts*/)
+		log.Printf("[IngestHandler] Wrote segment %d to RingBuffer", seq)
 
 		w.WriteHeader(http.StatusAccepted)
 	}

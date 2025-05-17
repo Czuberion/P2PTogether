@@ -66,7 +66,9 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 		default:
 		}
 
-		outputURLPattern := fmt.Sprintf("http://127.0.0.1:%d/ingest/%%d.ts", r.HlsPort)
+		// outputURLPattern := fmt.Sprintf("http://127.0.0.1:%d/ingest/%%d.ts", r.HlsPort)
+		// Use a padded sequence number for ffmpeg output filenames to ensure consistency.
+		outputURLPattern := fmt.Sprintf("http://127.0.0.1:%d/ingest/%%06d.ts", r.HlsPort)
 		encCfg := DefaultConfig(filePath)
 
 		ffmpegStream := BuildHLSStreamForHTTPOutput(encCfg, outputURLPattern, seqBase)
@@ -106,7 +108,12 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 		r.cmd = currentCmd
 		r.mu.Unlock()
 
-		log.Printf("EncoderRunner: Launching ffmpeg for %s (seq %d): %s %v", filePath, seqBase, currentCmd.Path, currentCmd.Args)
+		// Log the full command string as it would be run in a shell for easier debugging
+		fullCmdStr := currentCmd.Path
+		for _, arg := range currentCmd.Args {
+			fullCmdStr += " " + arg
+		}
+		log.Printf("EncoderRunner: Launching ffmpeg for %s (seq %d): %s", filePath, seqBase, fullCmdStr)
 		runErr := currentCmd.Run() // This blocks until ffmpeg exits or context is cancelled
 
 		r.mu.Lock()
@@ -131,7 +138,13 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 
 		// If context is not done, check runErr
 		if runErr != nil {
-			log.Printf("EncoderRunner: ffmpeg for %s (seq %d) exited with error: %v. Retrying in 5s...", filePath, seqBase, runErr)
+			// ffmpeg exited with an error. Log it with more detail and retry.
+			if exitErr, ok := runErr.(*exec.ExitError); ok {
+				log.Printf("EncoderRunner: ffmpeg for %s (seq %d) exited with error: %v. Stderr: %s. Retrying in 5s...", filePath, seqBase, runErr, string(exitErr.Stderr))
+			} else {
+				log.Printf("EncoderRunner: ffmpeg for %s (seq %d) exited with non-ExitError: %v. Retrying in 5s...", filePath, seqBase, runErr)
+			}
+
 			select {
 			case <-time.After(5 * time.Second):
 				// continue retry loop
