@@ -92,8 +92,10 @@ func (q *Queue) Append(it QueueItem) QueueItem {
 	defer q.mu.Unlock()
 	q.items = append(q.items, it)
 
-	if q.cursor == -1 && len(q.items) == 1 { // If queue was empty, new item is current
-		q.cursor = 0
+	// If the cursor was -1 (idle/end of queue) and items now exist,
+	// set the cursor to the newly added item to make it active.
+	if q.cursor == -1 && len(q.items) > 0 {
+		q.cursor = len(q.items) - 1
 	}
 	return it
 }

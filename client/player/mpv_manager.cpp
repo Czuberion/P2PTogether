@@ -70,14 +70,13 @@ void MpvManager::tryStartPlayback() {
     if (probeTimer_.isActive())
         probeTimer_.stop();
 
-    qDebug() << "[MpvManager] Playlist ready – emitting playlistReady()";
+    qDebug()
+        << "[MpvManager] Playlist ready – emitting playlistReady() for URL:"
+        << m_hlsURL;
 
-    // Emit exactly once per playlist URL (guard‑against duplicates if needed).
-    static QString lastUrl;
-    if (lastUrl != m_hlsURL) {
-        lastUrl = m_hlsURL;
-        Q_EMIT playlistReady(m_hlsURL);
-    }
+    // Always emit if playlist is deemed ready by probe, especially for reloads
+    // where URL string is same.
+    Q_EMIT playlistReady(m_hlsURL);
 }
 
 } // namespace player

@@ -62,7 +62,7 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                 << m_roleStore->getLocalPeerId();
         break;
     case client::ServerMsg::kPlaybackStateCmd: {
-        if (!m_mpvWidget) {
+        if (!m_mpvWidget || !m_mpvManager) {
             qWarning() << "Received PlaybackStateCmd but m_mpvWidget is null!";
             break;
         }
@@ -110,7 +110,7 @@ void App::onServerMessage(const client::ServerMsg& msg) {
         }
     } break;
     case client::ServerMsg::kPlaylistReset: {
-        if (!m_mpvWidget) {
+        if (!m_mpvWidget || !m_mpvManager) {
             qWarning() << "Received PlaylistReset but m_mpvWidget is null!";
             break;
         }
@@ -121,25 +121,58 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                 << "OriginSec" << resetCmd.origin_sec();
 
         m_playlistOriginSec = resetCmd.origin_sec(); // Store new origin
+        m_lastAppliedPlaybackHlc =
+            resetCmd.hlc_ts(); // Update HLC for this authoritative event
+        qInfo() << "App::onServerMessage: m_playlistOriginSec set to"
+                << m_playlistOriginSec << "m_lastAppliedPlaybackHlc set to"
+                << m_lastAppliedPlaybackHlc;
 
-        // Force mpv to reload the playlist. This will make it pick up new
-        // MEDIA-SEQUENCE and DISCONTINUITY. The MpvManager should still be
-        // polling the same HLS URL.
-        m_mpvWidget->command(QStringList()
-                             << "loadfile" << m_mpvManager->getStreamURL()
-                             << "replace");
-        // Explicitly seek to the start_pts of the new playlist item.
-        // This ensures that after a reload due to PlaylistReset, mpv's position
-        // is correctly anchored to the beginning of the new content.
-        // Using "exact" can help if precise seeking is needed without snapping.
-        m_mpvWidget->command(QStringList()
-                             << "seek" << QString::number(resetCmd.start_pts())
-                             << "absolute" << "exact");
+        // Disconnect any previous one-shot seek connection to avoid multiple
+        // triggers
+        if (m_seekOnLoadConnection) {
+            qInfo() << "App::onServerMessage: Disconnecting previous "
+                       "m_seekOnLoadConnection.";
+            disconnect(m_seekOnLoadConnection);
+        }
 
-        // Treat PlaylistReset as an authoritative playback-affecting command.
-        // This prevents older PlaybackStateCmds from being applied to the new
-        // content.
-        m_lastAppliedPlaybackHlc = resetCmd.hlc_ts();
+        // Connect a single-shot lambda to MpvManager::playlistReady
+        // This lambda will execute the seek *after* MpvManager confirms the HLS
+        // is ready and after video_panel's slot has presumably commanded mpv to
+        // 'loadfile'.
+        m_seekOnLoadConnection = connect(
+            m_mpvManager, &player::MpvManager::playlistReady, this,
+            [this,
+             startPts = resetCmd.start_pts()](const QString& /*loadedUrl*/) {
+                qInfo() << "App::onServerMessage (Deferred Seek via "
+                           "MpvManager::playlistReady): mpv 'seek absolute "
+                           "exact' for pos:"
+                        << startPts;
+                if (m_mpvWidget) {
+                    // Use QTimer::singleShot with 0ms timeout to defer the seek
+                    // command slightly. This gives mpv a chance to process the
+                    // 'loadfile' command from video_panel's slot before we try
+                    // to seek.
+                    QTimer::singleShot(0, this, [this, startPts]() {
+                        qInfo() << "App::onServerMessage (Deferred Seek - "
+                                   "QTimer): Executing mpv seek to"
+                                << startPts;
+                        m_mpvWidget->command(
+                            QStringList() << "seek" << QString::number(startPts)
+                                          << "absolute" << "exact");
+                    });
+                }
+                // QMetaObject::Connection is automatically disconnected by
+                // Qt::SingleShotConnection after firing but we clear our handle
+                // to it.
+                m_seekOnLoadConnection = {};
+            },
+            Qt::SingleShotConnection);
+
+        // Re-trigger MpvManager's probing for the (potentially updated content
+        // of the) same URL.
+        m_mpvManager->setStreamURL(m_mpvManager->getStreamURL());
+        qInfo() << "App::onServerMessage: MpvManager re-triggered for URL:"
+                << m_mpvManager->getStreamURL();
     } break;
     case client::ServerMsg::kQueueUpdate: // ADD THIS CASE
         // The actual update of the QListWidget is handled by the

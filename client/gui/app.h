@@ -62,6 +62,7 @@ private:
     double m_playlistOriginSec =
         0.0; // Origin of current HLS content relative to item start
     bool m_isCleaningUp = false; // Flag to prevent re-entrant cleanup
+    QMetaObject::Connection m_seekOnLoadConnection;
 
     void setupP2P();
     void setupUI();
