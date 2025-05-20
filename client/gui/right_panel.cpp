@@ -254,32 +254,39 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
                          QueueButtonsRefreshCallback();
                      });
 
-    QObject::connect(
-        addBtn, &QPushButton::clicked, [peer, window, queueList, worker]() {
-            QString filePath = QFileDialog::getOpenFileName(
-                window, "Open Video File", "",
-                "Video Files (*.mp4 *.mkv *.avi *.mov);;All Files (*)");
-            if (filePath.isEmpty())
-                return;
-            if (worker) {
-                client::ClientMsg clientMsg;
-                client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
-                cmd->set_type(client::p2p::QueueCmd_Type_APPEND);
-                cmd->set_file_path(filePath.toStdString());
-                // HLC timestamp can be set here if needed, e.g.,
-                // QDateTime::currentMSecsSinceEpoch()
-                // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+    // Use a non-blocking, non-native dialog so mpv’s GL thread doesn’t
+    // interfere with the OS-level file-chooser.  The dialog is destroyed
+    // automatically after use.
+    QObject::connect(addBtn, &QPushButton::clicked, [window, worker]() {
+        auto* dialog = new QFileDialog(window);
+        dialog->setWindowTitle("Open Video File");
 
-                qDebug() << "GUI: Sending APPEND QueueCmd for" << filePath;
-                // Use QMetaObject::invokeMethod to ensure send is called on the
-                // worker's thread if createRightPanel is called from a
-                // different thread than the worker's. However, worker->send is
-                // thread-safe due to its internal mutex.
-                worker->send(clientMsg);
-            }
-            // The QListWidget will be updated when ServerMsg_QueueUpdate is
-            // received. So, we don't manually addItem here anymore.
-        });
+        QStringList filters;
+        filters << "Video Files (*.mp4 *.mkv *.avi *.mov)"
+                << "All Files (*)";
+        dialog->setNameFilters(filters);
+
+        dialog->setFileMode(QFileDialog::ExistingFile);
+        dialog->setOption(QFileDialog::DontUseNativeDialog); // critical!
+
+        QObject::connect(dialog, &QFileDialog::fileSelected,
+                         [dialog, worker](const QString& filePath) {
+                             dialog->deleteLater();
+                             if (filePath.isEmpty() || !worker)
+                                 return;
+
+                             client::ClientMsg clientMsg;
+                             auto* cmd = clientMsg.mutable_queue_cmd();
+                             cmd->set_type(client::p2p::QueueCmd_Type_APPEND);
+                             cmd->set_file_path(filePath.toStdString());
+
+                             qDebug() << "GUI: Sending APPEND QueueCmd for"
+                                      << filePath;
+                             worker->send(clientMsg);
+                         });
+
+        dialog->open(); // non-modal → UI stays responsive
+    });
 
     QObject::connect(removeBtn, &QPushButton::clicked, [queueList, worker]() {
         int row = queueList->currentRow();
