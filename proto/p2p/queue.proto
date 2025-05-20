@@ -28,5 +28,10 @@ message QueueItem {
   string file_path = 1;
   string stored_by = 2; // peer.ID
   string added_by = 3;  // peer.ID
-  int64 hlc_ts = 4;
+  // Media sequence number of the first 2-second chunk of this file.
+  // Set when this item becomes the current playing item.
+  uint32 first_seq = 4;
+  uint32 num_segs = 5; // Total segments this file will occupy. Set when item
+                       // is added (e.g., from ffprobe).
+  int64 hlc_ts = 6;
 }

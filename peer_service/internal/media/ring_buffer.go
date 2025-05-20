@@ -187,3 +187,16 @@ func (rb *RingBuffer) GetNextSeq() uint32 {
 	defer rb.mu.RUnlock()
 	return rb.nextSeq
 }
+
+// Reset clears the buffer and sets the baseSeq and nextSeq to newBase.
+// The head is reset to 0. All segment data is zeroed out.
+// This is used when a new file starts streaming to ensure a clean slate for its segments.
+func (rb *RingBuffer) Reset(newBase uint32) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.baseSeq, rb.nextSeq, rb.head = newBase, newBase, 0
+	// Clear out old segment data to prevent stale data being served if seq numbers wrap unexpectedly (highly unlikely).
+	for i := range rb.buf {
+		rb.buf[i] = Segment{}
+	} // Zero out the Segment structs
+}

@@ -22,7 +22,11 @@
 namespace gui {
 
 App::App(quint16 grpcPort, QObject* parent) :
-    QObject(parent), m_grpcPort(grpcPort), m_lastAppliedPlaybackHlc(-1) {
+    // QObject(parent), m_grpcPort(grpcPort), m_lastAppliedPlaybackHlc(-1) {
+    QObject(parent),
+    m_grpcPort(grpcPort),
+    m_lastAppliedPlaybackHlc(-1),
+    m_playlistOriginSec(0.0) {
     // Initialize other members to nullptr or default values if necessary
     m_roleStore =
         new P2P::Roles::RoleStore(this); // Parent to App for auto-deletion
@@ -71,11 +75,21 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                     << cmd.target_is_playing() << "Pos" << cmd.target_time_pos()
                     << "Speed" << cmd.target_speed();
 
+            // Translate incoming global time_pos to local mpv time
+            double localTargetPos = cmd.target_time_pos() - m_playlistOriginSec;
+            // Clamp to 0 if origin_sec makes it negative (e.g. if origin_sec
+            // just changed)
+            if (localTargetPos < 0) {
+                qInfo() << "Clamping localTargetPos from" << localTargetPos
+                        << "to 0. Global:" << cmd.target_time_pos()
+                        << "Origin:" << m_playlistOriginSec;
+                localTargetPos = 0.0;
+            }
+
             m_mpvWidget->setProperty("speed", cmd.target_speed());
             // mpv's 'seek X absolute' preserves play/pause state
             m_mpvWidget->command(QStringList()
-                                 << "seek"
-                                 << QString::number(cmd.target_time_pos())
+                                 << "seek" << QString::number(localTargetPos)
                                  << "absolute");
             m_mpvWidget->setProperty("pause", !cmd.target_is_playing());
 
@@ -85,14 +99,56 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                                                                    : "Play");
             }
             // if (m_seekSlider)
-            // m_seekSlider->setValue(static_cast<int>(cmd.target_time_pos()));
+            // m_seekSlider->setValue(static_cast<int>(localTargetPos));
 
+            // It's crucial that PlaybackStateCmd applies only if it's truly
+            // newer than any PlaylistReset that might have also occurred. For
+            // now, simple HLC comparison is fine.
             m_lastAppliedPlaybackHlc = cmd.hlc_ts();
         } else {
             qInfo() << "Ignoring stale PlaybackStateCmd HLC:" << cmd.hlc_ts();
         }
     } break;
-    // TODO: Handle kQueueUpdate, kStreamStatus, kChatMsg
+    case client::ServerMsg::kPlaylistReset: {
+        if (!m_mpvWidget) {
+            qWarning() << "Received PlaylistReset but m_mpvWidget is null!";
+            break;
+        }
+        const auto& resetCmd = msg.playlist_reset();
+        qInfo() << "App::onServerMessage: PROCESSING PlaylistReset (Type 10):"
+                << "New Sequence" << resetCmd.sequence() << "Start PTS"
+                << resetCmd.start_pts() << "HLC" << resetCmd.hlc_ts()
+                << "OriginSec" << resetCmd.origin_sec();
+
+        m_playlistOriginSec = resetCmd.origin_sec(); // Store new origin
+
+        // Force mpv to reload the playlist. This will make it pick up new
+        // MEDIA-SEQUENCE and DISCONTINUITY. The MpvManager should still be
+        // polling the same HLS URL.
+        m_mpvWidget->command(QStringList()
+                             << "loadfile" << m_mpvManager->getStreamURL()
+                             << "replace");
+        // Explicitly seek to the start_pts of the new playlist item.
+        // This ensures that after a reload due to PlaylistReset, mpv's position
+        // is correctly anchored to the beginning of the new content.
+        // Using "exact" can help if precise seeking is needed without snapping.
+        m_mpvWidget->command(QStringList()
+                             << "seek" << QString::number(resetCmd.start_pts())
+                             << "absolute" << "exact");
+
+        // Treat PlaylistReset as an authoritative playback-affecting command.
+        // This prevents older PlaybackStateCmds from being applied to the new
+        // content.
+        m_lastAppliedPlaybackHlc = resetCmd.hlc_ts();
+    } break;
+    case client::ServerMsg::kQueueUpdate: // ADD THIS CASE
+        // The actual update of the QListWidget is handled by the
+        // connection in right_panel.cpp.
+        // App itself might not need to do anything, or just log.
+        qInfo() << "App::onServerMessage: Received QueueUpdate (Type 1) - "
+                   "primarily handled by right_panel.";
+        break;
+    // TODO: Handle kStreamStatus, kChatMsg
     default:
         qInfo() << "App::onServerMessage: Unhandled message type:"
                 << msg.payload_case();
@@ -207,7 +263,8 @@ void App::setupUI() {
     QSplitter* mainSplitter = new QSplitter(Qt::Horizontal, centralWidget);
     mainLayout->addWidget(mainSplitter);
 
-    QWidget* leftPanel = createVideoPanel(mpvManager, m_mainWindow, m_worker);
+    QWidget* leftPanel =
+        createVideoPanel(mpvManager, m_mainWindow, m_worker, this);
     if (!leftPanel) {
         qCritical() << "Failed to create video panel!";
         return;
@@ -217,6 +274,9 @@ void App::setupUI() {
         leftPanel->findChild<player::MpvWidget*>(); // Find after creation
     if (!m_mpvWidget)
         qWarning() << "App::setupUI: MpvWidget not found in leftPanel!";
+    if (mpvManager) {
+        m_mpvManager = mpvManager;
+    }
     m_playPauseBtn = leftPanel->findChild<QPushButton*>("playPauseBtn");
     if (!m_playPauseBtn)
         qWarning() << "App::setupUI: playPauseBtn not found in leftPanel!";

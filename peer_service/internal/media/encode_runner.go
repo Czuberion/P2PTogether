@@ -68,13 +68,19 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 
 		// outputURLPattern := fmt.Sprintf("http://127.0.0.1:%d/ingest/%%d.ts", r.HlsPort)
 		// Use a padded sequence number for ffmpeg output filenames to ensure consistency.
-		outputURLPattern := fmt.Sprintf("http://127.0.0.1:%d/ingest/%%06d.ts", r.HlsPort)
-		encCfg := DefaultConfig(filePath)
+		// outputURLPattern := fmt.Sprintf("http://127.0.0.1:%d/ingest/%%06d.ts", r.HlsPort)
+		// encCfg := DefaultConfig(filePath)
+		hlsIngestBaseURL := fmt.Sprintf("http://127.0.0.1:%d", r.HlsPort)
+		encCfg := DefaultConfig(filePath, hlsIngestBaseURL) // Pass HlsIngestURL to DefaultConfig
 
-		ffmpegStream := BuildHLSStreamForHTTPOutput(encCfg, outputURLPattern, seqBase)
+		// ffmpegStream := BuildHLSStreamForHTTPOutput(encCfg, outputURLPattern, seqBase)
+		// BuildHLSStreamForHTTPOutput now uses hls_segment_filename
+		ffmpegStream := BuildHLSStreamForHTTPOutput(encCfg, seqBase)
+		log.Printf("EncoderRunner: ffmpegStream built for %s (seqBase %d)", filePath, seqBase)
 
 		// Compile returns *exec.Cmd directly
 		compiledCmd := ffmpegStream.Compile()
+		log.Printf("EncoderRunner: ffmpegStream compiled for %s (seqBase %d)", filePath, seqBase)
 
 		var currentCmd *exec.Cmd
 		if compiledCmd.Path == "" { // Basic check for compilation failure
@@ -90,11 +96,14 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 
 		// Use exec.CommandContext to ensure ffmpeg is killed if the context is cancelled.
 
-		if len(compiledCmd.Args) > 1 {
-			currentCmd = exec.CommandContext(ctx, compiledCmd.Path, compiledCmd.Args[1:]...)
-		} else {
-			currentCmd = exec.CommandContext(ctx, compiledCmd.Path)
-		}
+		// if len(compiledCmd.Args) > 1 {
+		// 	currentCmd = exec.CommandContext(ctx, compiledCmd.Path, compiledCmd.Args[1:]...)
+		// } else {
+		// 	currentCmd = exec.CommandContext(ctx, compiledCmd.Path)
+		// }
+		// compiledCmd.Args already includes the program name as Args[0] if using ffmpeg-go's Compile()
+		// So, for exec.CommandContext, it should be compiledCmd.Args[0] (path) and compiledCmd.Args[1:]... (arguments)
+		currentCmd = exec.CommandContext(ctx, compiledCmd.Path, compiledCmd.Args[1:]...)
 		currentCmd.Stdout = log.Writer() // Capture ffmpeg stdout
 		currentCmd.Stderr = log.Writer() // Capture ffmpeg stderr
 
@@ -109,10 +118,12 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 		r.mu.Unlock()
 
 		// Log the full command string as it would be run in a shell for easier debugging
-		fullCmdStr := currentCmd.Path
-		for _, arg := range currentCmd.Args {
-			fullCmdStr += " " + arg
-		}
+		// fullCmdStr := currentCmd.Path
+		// for _, arg := range currentCmd.Args {
+		// 	fullCmdStr += " " + arg
+		// }
+		// log.Printf("EncoderRunner: Launching ffmpeg for %s (seq %d): %s", filePath, seqBase, fullCmdStr)
+		fullCmdStr := currentCmd.String() // Uses String() method of exec.Cmd for logging
 		log.Printf("EncoderRunner: Launching ffmpeg for %s (seq %d): %s", filePath, seqBase, fullCmdStr)
 		runErr := currentCmd.Run() // This blocks until ffmpeg exits or context is cancelled
 

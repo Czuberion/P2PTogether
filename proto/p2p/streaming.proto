@@ -21,3 +21,12 @@ message VideoSegmentGossip {
   // bool is_discontinuity = 5; // Optional: If explicit discontinuity signal is
   // needed here
 }
+
+message PlaylistReset {
+  uint32 sequence = 1;  // new starting EXT-X-MEDIA-SEQUENCE
+  double start_pts = 2; // seconds
+  // Offset in seconds from the start of the HLS EVENT playlist to the logical
+  // start of this item.
+  double origin_sec = 3;
+  int64 hlc_ts = 4;
+}

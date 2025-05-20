@@ -15,6 +15,7 @@
 #pragma once
 
 #include "p2p/peer.h"
+#include "player/mpv_manager.h"
 #include "player/mpvwidget.h"
 #include "roles/role_store.h"
 #include "transport/control_stream_worker.h"
@@ -39,6 +40,7 @@ public:
     ~App();
 
     int exec(); // Renamed from runGUI to match QApplication::exec
+    double playlistOriginSec() const { return m_playlistOriginSec; }
 
 private slots:
     // Slot to confirm netThread has started
@@ -51,11 +53,14 @@ private:
     P2P::ControlStreamWorker* m_worker = nullptr;
     QMainWindow* m_mainWindow          = nullptr;
     player::MpvWidget* m_mpvWidget     = nullptr;
+    player::MpvManager* m_mpvManager   = nullptr;
     QPushButton* m_playPauseBtn        = nullptr;
     // QSlider* m_seekSlider = nullptr; // For later
 
     // Store last applied HLC for playback state
     int64_t m_lastAppliedPlaybackHlc = -1;
+    double m_playlistOriginSec =
+        0.0; // Origin of current HLS content relative to item start
     bool m_isCleaningUp = false; // Flag to prevent re-entrant cleanup
 
     void setupP2P();

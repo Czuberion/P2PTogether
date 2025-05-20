@@ -4,6 +4,8 @@ package media
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
@@ -19,11 +21,12 @@ type Config struct {
 	Tune           string // x264 tuning profile.
 	AudioBitrate   string // AAC audio bitrate.
 	GOPCeiling     int    // Hard upper bound for key-frame interval. [frames]
+	HlsIngestURL   string // Base URL for HLS segment ingest (e.g., "http://127.0.0.1:PORT")
 }
 
 // DefaultConfig returns sensible low-latency defaults.
 // 2s segments, veryfast preset, zerolatency tune, 128k audio, 240 frames GOP.
-func DefaultConfig(input string) Config {
+func DefaultConfig(input string, hlsIngestURL string) Config {
 	return Config{
 		Input: input,
 
@@ -49,13 +52,15 @@ func DefaultConfig(input string) Config {
 		// Safety ceiling: 2 s worth of frames *assuming* <=120 fps input.
 		// The real I-frame cadence is enforced by -force_key_frames.
 		GOPCeiling: 240,
+
+		HlsIngestURL: hlsIngestURL,
 	}
 }
 
 // BuildHLSStreamForHTTPOutput assembles an ffmpeg-go stream configured to output HLS segments
-// via HTTP PUT to the specified outputURLPattern, starting with seqBase.
+// via HTTP PUT to the specified HlsIngestURL, starting with seqBase.
 // It uses the provided Config for encoding parameters.
-func BuildHLSStreamForHTTPOutput(cfg Config, outputURLPattern string, seqBase uint32) *ffmpeg.Stream {
+func BuildHLSStreamForHTTPOutput(cfg Config, seqBase uint32) *ffmpeg.Stream {
 	// Align I-frames by *time* rather than frame-count so any FPS (fixed or
 	// VFR) can be handled.
 	forceExpr := fmt.Sprintf("expr:gte(t,n_forced*%d)", cfg.SegmentSeconds)
@@ -74,15 +79,21 @@ func BuildHLSStreamForHTTPOutput(cfg Config, outputURLPattern string, seqBase ui
 
 	inputStream := ffmpeg.Input(cfg.Input, inArgs)
 
+	// Segment filename pattern for HTTP PUT. FFmpeg will combine this with HlsIngestURL.
+	// Example: if HlsIngestURL = "http://127.0.0.1:8080", segments will be PUT to
+	// "http://127.0.0.1:8080/ingest/%06d.ts"
+	segmentFilenamePattern := fmt.Sprintf("%s/ingest/%%06d.ts", cfg.HlsIngestURL)
+
 	// These are the output arguments specific to HLS PUT
 	outputArgs := ffmpeg.KwArgs{
 		// HLS Muxer options
-		"f":             "hls",
-		"hls_time":      fmt.Sprintf("%d", cfg.SegmentSeconds),
-		"hls_list_size": "0",                        // Keep all segments for EVENT playlist type
-		"hls_flags":     "independent_segments",     // Essential for clean segment boundaries
-		"start_number":  fmt.Sprintf("%d", seqBase), // Starting HLS media sequence number
-		"method":        "PUT",                      // HTTP PUT for segments
+		"f":                    "hls",
+		"hls_time":             fmt.Sprintf("%d", cfg.SegmentSeconds),
+		"hls_list_size":        "0",                                 // Keep all segments for EVENT playlist type
+		"hls_flags":            "independent_segments+omit_endlist", // Essential for clean segment boundaries, omit_endlist for live
+		"start_number":         fmt.Sprintf("%d", seqBase),          // Starting HLS media sequence number
+		"hls_segment_filename": segmentFilenamePattern,              // Specifies the URL for PUT-ing segments
+		"method":               "PUT",                               // HTTP PUT for segments
 		// The actual URL pattern is the first argument to Output(), not a KwArg here.
 
 		// Video encoding options
@@ -91,7 +102,7 @@ func BuildHLSStreamForHTTPOutput(cfg Config, outputURLPattern string, seqBase ui
 		"tune":             cfg.Tune,
 		"force_key_frames": forceExpr,
 		"g":                fmt.Sprintf("%d", gop),
-		"keyint_min":       fmt.Sprintf("%d", gop),
+		"keyint_min":       fmt.Sprintf("%d", gop), // Ensure keyint_min matches gop for zerolatency compatibility
 		"sc_threshold":     "0",
 
 		// Audio encoding options
@@ -99,5 +110,13 @@ func BuildHLSStreamForHTTPOutput(cfg Config, outputURLPattern string, seqBase ui
 		"b:a": cfg.AudioBitrate,
 	}
 
-	return inputStream.Output(outputURLPattern, outputArgs)
+	// The first argument to Output() is the playlist file.
+	// Since we generate the playlist ourselves and only care about ffmpeg PUTing segments,
+	// we can direct ffmpeg's playlist output to /dev/null (or NUL on Windows).
+	// ffmpeg-go might handle os.DevNull correctly.
+	// Using a unique temp file per stream start might be safer than a fixed /dev/null if ffmpeg has issues with it.
+	playlistOutputTarget := filepath.Join(os.TempDir(), fmt.Sprintf("p2ptogether-dummy-master-%d.m3u8", seqBase))
+	// playlistOutputTarget := os.DevNull
+
+	return inputStream.Output(playlistOutputTarget, outputArgs)
 }

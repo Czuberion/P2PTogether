@@ -7,10 +7,12 @@ import (
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
+	"google.golang.org/protobuf/proto"
 
 	"peer_service/internal/common"
 	"peer_service/internal/media"
 	"peer_service/internal/roles"
+	clientpb "peer_service/proto"
 	p2ppb "peer_service/proto/p2p"
 )
 
@@ -129,6 +131,61 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 			return
 		}
 
+		log.Printf("Node.EnsureRunnerState: [%s] Proceeding to start/restart runner for %s", n.ID(), filePath)
+
+		// --- New logic for starting a new file ---
+		// This block executes if we are `shouldRun` and either not running, or running wrong file/seq.
+
+		// 1. Calculate firstSeq for this new stream instance.
+		//    This should come from the global media sequence managed by QueueController.
+		currentGlobalMediaSequence := qc.GetNextStartSequence()
+		calculatedFirstSeq := currentGlobalMediaSequence
+		// In a more advanced model, if seqBase was part of headItem and non-zero, use that.
+		// For now, always use the global sequence.
+
+		// 2. Calculate originSec for this item.
+		//    start_pts for a new item is typically 0.
+		calculatedOriginSec := float64(calculatedFirstSeq) * media.SegmentDuration.Seconds() // Assuming start_pts is 0
+
+		// 3. Update the QueueItem in the QueueController's queue with first_seq. NumSegs should already be there.
+		//    This is critical so that other parts of the system (like seek logic) know this item's mapping.
+		//    The `head` variable here is from qc.Q().Head() before the Node.mu lock.
+		//    We need to get the current head again or ensure `filePath` matches current head.
+		log.Printf("Node.EnsureRunnerState: [%s] Attempting to update QueueItem FirstSeq...", n.ID())
+		if currentHeadItem, ok := qc.Q().Head(); ok {
+			currentHeadItem.FirstSeq = calculatedFirstSeq
+			// currentHeadItem.NumSegs is assumed to be set on APPEND.
+			qc.Q().SetItemAtCursor(currentHeadItem) // Updates the item at the current cursor
+
+			// After updating the item, broadcast new QueueUpdate
+			if localHub := n.hubRef; localHub != nil { // n.hubRef should be qc.hubRef if passed consistently
+				log.Printf("Node.EnsureRunnerState: [%s] Broadcasting QueueUpdate after setting FirstSeq for %s to %d", n.ID(), filePath, calculatedFirstSeq)
+				localHub.Broadcast(qc.Snapshot()) // qc.Snapshot() will reflect the updated item
+				log.Printf("Node.EnsureRunnerState: [%s] Broadcasted QueueUpdate to localHub.", n.ID())
+			}
+
+			// Use a general background context for these initial broadcasts
+			initialBroadcastCtx := context.Background()
+
+			if ctrlTopic := n.ctrlTopic; ctrlTopic != nil {
+				if marshalledMsg, err := proto.Marshal(qc.Snapshot()); err == nil {
+					if errPub := ctrlTopic.Publish(initialBroadcastCtx, marshalledMsg); errPub != nil {
+						log.Printf("Node.EnsureRunnerState: [%s] ERROR publishing QueueUpdate to ctrlTopic: %v", n.ID(), errPub)
+					} else {
+						log.Printf("Node.EnsureRunnerState: [%s] Published QueueUpdate to ctrlTopic.", n.ID())
+					}
+				} else {
+					log.Printf("Node.EnsureRunnerState: [%s] ERROR marshalling QueueUpdate for ctrlTopic: %v", n.ID(), err)
+				}
+			} else {
+				log.Printf("Node.EnsureRunnerState: [%s] ctrlTopic is NIL, cannot publish QueueUpdate.", n.ID())
+			}
+			log.Printf("Node.EnsureRunnerState: [%s] QueueItem FirstSeq updated for %s to %d.", n.ID(), filePath, calculatedFirstSeq)
+		} else {
+			log.Printf("Node.EnsureRunnerState: [%s] Could not update QueueItem for %s; head mismatch or queue empty.", n.ID(), filePath)
+		}
+		log.Printf("Node.EnsureRunnerState: [%s] Finished QueueItem update attempt.", n.ID())
+
 		// Stop current runner if it exists or is for a different task
 		if existingRunnerCancel != nil {
 			log.Printf("Node.EnsureRunnerState: Stopping existing runner for %s (seq %d) to start/restart for %s (seq %d).", currentFile, currentSeqBase, filePath, seqBase)
@@ -137,7 +194,58 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 			// The old goroutine should detect cancellation and exit.
 		}
 
-		log.Printf("Node.EnsureRunnerState: Preparing to start new runner for %s, seqBase %d.", filePath, seqBase)
+		// // Trigger discontinuity for the new stream on this node's HLS server.
+		// // This is important if this node itself is also a viewer of its own stream.
+		// if n.queueControllerRef != nil && n.queueControllerRef.triggerDiscontinuity != nil {
+		// 	log.Printf("Node.EnsureRunnerState: Triggering local HLS discontinuity for new stream %s (seq %d)", filePath, seqBase)
+		// 	n.queueControllerRef.triggerDiscontinuity()
+		// }
+		log.Printf("Node.EnsureRunnerState: [%s] Existing runner (if any) cancellation requested.", n.ID())
+
+		// 4. Reset this node's RingBuffer with the new firstSeq.
+		if n.ringBuffer != nil {
+			log.Printf("Node.EnsureRunnerState: [%s] Resetting RingBuffer to new base sequence: %d for file %s", n.ID(), calculatedFirstSeq, filePath)
+			n.ringBuffer.Reset(calculatedFirstSeq)
+		}
+		// Trigger HLS discontinuity if this node is starting a new stream.
+		if qc.triggerDiscontinuity != nil { // qc is n.queueControllerRef
+			log.Printf("Node.EnsureRunnerState: [%s] Triggering HLS discontinuity for new stream %s (new firstSeq %d)", n.ID(), filePath, calculatedFirstSeq)
+			qc.triggerDiscontinuity()
+		}
+		log.Printf("Node.EnsureRunnerState: [%s] RingBuffer reset and discontinuity triggered.", n.ID())
+
+		// 5. Emit PlaylistReset
+		playlistResetMsg := &p2ppb.PlaylistReset{
+			Sequence:  calculatedFirstSeq,
+			StartPts:  0.0, // New files start at 0.0 relative to their own content
+			OriginSec: calculatedOriginSec,
+			HlcTs:     common.GetCurrentHLC(),
+		}
+		// Use context.Background() for broadcasts not tied to a specific runner's lifecycle.
+		// broadcastCtx is already defined above for the QueueUpdate broadcast. We can reuse it.
+		broadcastCtx := context.Background() // Not needed if already defined
+		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaylistReset{PlaylistReset: playlistResetMsg}}
+		log.Printf("Node.EnsureRunnerState: [%s] Broadcasting PlaylistReset for %s. Sequence: %d, OriginSec: %.2f", n.ID(), filePath, calculatedFirstSeq, calculatedOriginSec)
+		if hub := n.hubRef; hub != nil {
+			hub.Broadcast(serverPayload)
+		} // n.hubRef is qc.hubRef
+		if ctrlTopic := n.ctrlTopic; ctrlTopic != nil {
+			if marshalledMsg, err := proto.Marshal(serverPayload); err == nil {
+				if errPub := ctrlTopic.Publish(broadcastCtx, marshalledMsg); errPub != nil {
+					log.Printf("Node.EnsureRunnerState: [%s] ERROR publishing PlaylistReset to ctrlTopic: %v", n.ID(), errPub)
+				} else {
+					log.Printf("Node.EnsureRunnerState: [%s] Published PlaylistReset to ctrlTopic.", n.ID())
+				}
+			} else {
+				log.Printf("Node.EnsureRunnerState: [%s] ERROR marshalling PlaylistReset for ctrlTopic: %v", n.ID(), err)
+			}
+		} else {
+			log.Printf("Node.EnsureRunnerState: [%s] ctrlTopic is NIL, cannot publish PlaylistReset.", n.ID())
+		}
+		log.Printf("Node.EnsureRunnerState: [%s] PlaylistReset broadcast initiated.", n.ID())
+
+		targetSeqForRunner := calculatedFirstSeq
+		log.Printf("Node.EnsureRunnerState: [%s] Preparing to start new runner for %s, actual seqBase for ffmpeg: %d.", n.ID(), filePath, targetSeqForRunner)
 		newCtx, newCancel := context.WithCancel(context.Background())
 		n.runnerCtx = newCtx
 		n.runnerCancel = newCancel
@@ -174,6 +282,17 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 			if runErr == nil && ctx.Err() == nil { // Successful EOF & context not cancelled during run
 				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) finished with EOF. Triggering QueueCmd_NEXT.", path, seq)
 
+				// Report the next sequence number from this stream to the QueueController
+				// so it can update the global media sequence for the *next* streamer.
+				if runner != nil && localQC != nil { // runner is n.encoderRunner
+					// localQC.UpdateGlobalMediaSequence(n.ringBuffer.GetNextSeq()) // Use node's ringbuffer's nextSeq
+					// Read ringBuffer under Node's lock
+					if n.ringBuffer != nil {
+						finishedStreamNextSeq := n.ringBuffer.GetNextSeq()
+						localQC.UpdateGlobalMediaSequence(finishedStreamNextSeq)
+					}
+				}
+
 				// Use the captured localQC, localRM, localHub
 				// For ctrlTopic, read it dynamically using the getter to ensure it's current,
 				// as AttachPubSub could be called.
@@ -204,7 +323,9 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) exited with error: %v", path, seq, runErr)
 				// Consider if any queue action is needed on other errors (e.g., skip item)
 			}
-		}(n.runnerCtx, filePath, seqBase, localRunner)
+			// }(n.runnerCtx, filePath, seqBase, localRunner)
+		}(n.runnerCtx, filePath, targetSeqForRunner, localRunner) // Pass targetSeqForRunner
+		// }
 
 	} else { // Should not be running
 		if isRunning {
@@ -279,8 +400,12 @@ func (n *Node) ReactToQueueUpdate() {
 		// This node should stream the current head item.
 
 		// Get the next global media sequence number from the RingBuffer.
-		seqBaseToUse := n.ringBuffer.GetNextSeq()
-		log.Printf("Node.ReactToQueueUpdate: [%s] Using seqBase %d from RingBuffer.GetNextSeq()", n.ID(), seqBaseToUse)
+		// seqBaseToUse := n.ringBuffer.GetNextSeq()
+		// log.Printf("Node.ReactToQueueUpdate: [%s] Using seqBase %d from RingBuffer.GetNextSeq()", n.ID(), seqBaseToUse)
+
+		// Get the next global media sequence number from the QueueController.
+		seqBaseToUse := qc.GetNextStartSequence()
+		log.Printf("Node.ReactToQueueUpdate: [%s] Using global seqBase %d from QueueController for new stream", n.ID(), seqBaseToUse)
 
 		log.Printf("Node.ReactToQueueUpdate: [%s] Head item for me. Ensuring runner for: %s, seqBase %d", n.ID(), head.FilePath, seqBaseToUse)
 		n.EnsureRunnerState(head.FilePath, seqBaseToUse)
@@ -329,4 +454,10 @@ func (n *Node) Traffic() (up, down uint64) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.bytesUp, n.bytesDown
+}
+
+func (n *Node) RingBuffer() *media.RingBuffer {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.ringBuffer
 }

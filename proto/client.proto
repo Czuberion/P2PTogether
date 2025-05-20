@@ -51,6 +51,7 @@ message ServerMsg {
     client.p2p.AllPeerRoleAssignments all_peer_role_assignments = 7;
     LocalPeerIdentity local_peer_identity = 8;
     client.p2p.SetPlaybackStateCmd playback_state_cmd = 9;
+    client.p2p.PlaylistReset playlist_reset = 10;
   }
 }
 

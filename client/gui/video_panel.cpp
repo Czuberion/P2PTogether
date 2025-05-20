@@ -30,9 +30,15 @@ static void getCurrentPlaybackState(player::MpvWidget* mpvWidget, double& pos,
 }
 
 // Helper function to send SetPlaybackStateCmd
-static void sendPlaybackStateCommand(P2P::ControlStreamWorker* worker,
-                                     double targetPos, bool targetIsPlaying,
-                                     double targetSpeed) {
+static void
+sendPlaybackStateCommand(P2P::ControlStreamWorker* worker,
+                         //  double localTargetPos,
+                         //  double targetPos,
+                         //  bool targetIsPlaying,
+                         double localTargetPos, // mpv's local time-pos
+                         bool targetIsPlaying, double targetSpeed,
+                         //  double originSec) {
+                         gui::App* appInstance) { // Pass App instance
     if (!worker) {
         qWarning()
             << "Cannot send SetPlaybackStateCmd: ControlStreamWorker is null";
@@ -41,18 +47,30 @@ static void sendPlaybackStateCommand(P2P::ControlStreamWorker* worker,
     client::ClientMsg clientMsg;
     client::p2p::SetPlaybackStateCmd* cmd =
         clientMsg.mutable_playback_state_cmd(); // Use correct field name
-    cmd->set_target_time_pos(targetPos);
+
+    double originSec = 0.0;
+    if (appInstance) {
+        originSec = appInstance->playlistOriginSec();
+    }
+
+    // Send global time
+    cmd->set_target_time_pos(localTargetPos + originSec);
     cmd->set_target_is_playing(targetIsPlaying);
     cmd->set_target_speed(targetSpeed);
     cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch()); // Set HLC timestamp
     worker->send(clientMsg);
-    qDebug() << "Sent SetPlaybackStateCmd: Pos" << targetPos << "Playing"
-             << targetIsPlaying << "Speed" << targetSpeed;
+    // qDebug() << "Sent SetPlaybackStateCmd: Pos" << targetPos << "Playing"
+    //          << targetIsPlaying << "Speed" << targetSpeed << "GlobalPos"
+    //          << (localTargetPos + originSec);
+    qDebug() << "Sent SetPlaybackStateCmd: LocalPos" << localTargetPos
+             << "Playing" << targetIsPlaying << "Speed" << targetSpeed
+             << "OriginSec" << originSec << "GlobalPos"
+             << (localTargetPos + originSec);
 }
 
 QWidget* createVideoPanel(player::MpvManager* mpvManager,
                           QMainWindow* mainWindow,
-                          P2P::ControlStreamWorker* worker) {
+                          P2P::ControlStreamWorker* worker, gui::App* app) {
     // Container for video and controls
     QWidget* videoPanel = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(videoPanel);
@@ -124,20 +142,24 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     rewindBtn->setFixedSize(40, 40);
     rewindBtn->setStyleSheet("font-size: 20px; text-align: center;");
     rewindBtn->setToolTip("Rewind 5 seconds");
-    QObject::connect(rewindBtn, &QPushButton::clicked, [mpvWidget, worker]() {
-        if (!mpvWidget)
-            return;
-        double currentPos, currentSpeed;
-        bool currentIsPlaying;
-        getCurrentPlaybackState(mpvWidget, currentPos, currentIsPlaying,
-                                currentSpeed);
-        double targetPos = qMax(0.0, currentPos - 5.0);
+    QObject::connect(
+        rewindBtn, &QPushButton::clicked, [mpvWidget, worker, app]() {
+            if (!mpvWidget)
+                return;
+            double currentPos, currentSpeed;
+            bool currentIsPlaying;
+            getCurrentPlaybackState(mpvWidget, currentPos, currentIsPlaying,
+                                    currentSpeed);
+            double localTargetPos = qMax(0.0, currentPos - 5.0);
 
-        mpvWidget->command(QStringList() << "seek" << QString::number(targetPos)
-                                         << "absolute");
-        sendPlaybackStateCommand(worker, targetPos, currentIsPlaying,
-                                 currentSpeed);
-    });
+            mpvWidget->command(QStringList()
+                               << "seek" << QString::number(localTargetPos)
+                               << "absolute");
+            // sendPlaybackStateCommand(worker, targetPos, currentIsPlaying,
+            //                          currentSpeed);
+            sendPlaybackStateCommand(worker, localTargetPos, currentIsPlaying,
+                                     currentSpeed, app);
+        });
     controlLayout->addWidget(rewindBtn);
 
     // Play/Pause Button
@@ -148,7 +170,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     playPauseBtn->setToolTip("Play");
     QObject::connect(
         playPauseBtn, &QPushButton::clicked,
-        [mpvWidget, worker, playPauseBtn]() {
+        [mpvWidget, worker, playPauseBtn, app]() {
             if (!mpvWidget)
                 return;
             double currentPos, currentSpeed;
@@ -160,7 +182,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
             playPauseBtn->setToolTip(!currentIsPlaying ? "Pause" : "Play");
 
             sendPlaybackStateCommand(worker, currentPos, !currentIsPlaying,
-                                     currentSpeed);
+                                     currentSpeed, app);
         });
     controlLayout->addWidget(playPauseBtn);
 
@@ -169,23 +191,22 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     fastForwardBtn->setFixedSize(40, 40);
     fastForwardBtn->setStyleSheet("font-size: 20px; text-align: center;");
     fastForwardBtn->setToolTip("Fast forward 5 seconds");
-    QObject::connect(fastForwardBtn, &QPushButton::clicked,
-                     [mpvWidget, worker]() { // Capture worker
-                         if (!mpvWidget)
-                             return;
-                         double currentPos, currentSpeed;
-                         bool currentPlaying;
-                         getCurrentPlaybackState(mpvWidget, currentPos,
-                                                 currentPlaying, currentSpeed);
-                         double targetPos = currentPos + 5.0;
+    QObject::connect(
+        fastForwardBtn, &QPushButton::clicked, [mpvWidget, worker, app]() {
+            if (!mpvWidget)
+                return;
+            double currentPos, currentSpeed;
+            bool currentPlaying;
+            getCurrentPlaybackState(mpvWidget, currentPos, currentPlaying,
+                                    currentSpeed);
+            double localTargetPos = currentPos + 5.0;
 
-                         mpvWidget->command(QStringList()
-                                            << "seek"
-                                            << QString::number(targetPos)
-                                            << "absolute"); // Apply locally
-                         sendPlaybackStateCommand(worker, targetPos,
-                                                  currentPlaying, currentSpeed);
-                     });
+            mpvWidget->command(QStringList()
+                               << "seek" << QString::number(localTargetPos)
+                               << "absolute"); // Apply locally
+            sendPlaybackStateCommand(worker, localTargetPos, currentPlaying,
+                                     currentSpeed, app);
+        });
     controlLayout->addWidget(fastForwardBtn);
 
     // Skip forward (assuming next item in a playlist - not implemented yet)
@@ -203,7 +224,8 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     stopButton->setStyleSheet("font-size: 20px; text-align: center;");
     stopButton->setToolTip("Stop (pause and rewind)");
     QObject::connect(
-        stopButton, &QPushButton::clicked, [mpvWidget, worker, playPauseBtn]() {
+        stopButton, &QPushButton::clicked,
+        [mpvWidget, worker, playPauseBtn, app]() {
             if (!mpvWidget)
                 return;
             double _pos, currentSpeed;
@@ -214,7 +236,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
             mpvWidget->command(QStringList() << "seek" << "0" << "absolute");
             playPauseBtn->setText("▶");
             playPauseBtn->setToolTip("Play");
-            sendPlaybackStateCommand(worker, 0.0, false, currentSpeed);
+            sendPlaybackStateCommand(worker, 0.0, false, currentSpeed, app);
         });
     controlLayout->addWidget(stopButton);
 
@@ -223,16 +245,19 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     replayBtn->setFixedSize(40, 40);
     replayBtn->setStyleSheet("font-size: 20px; text-align: center;");
     replayBtn->setToolTip("Replay (seek to beginning)");
-    QObject::connect(replayBtn, &QPushButton::clicked, [mpvWidget, worker]() {
-        if (!mpvWidget)
-            return;
-        double _pos, currentSpeed;
-        bool currentPlaying;
-        getCurrentPlaybackState(mpvWidget, _pos, currentPlaying, currentSpeed);
+    QObject::connect(
+        replayBtn, &QPushButton::clicked, [mpvWidget, worker, app]() {
+            if (!mpvWidget)
+                return;
+            double _pos, currentSpeed;
+            bool currentPlaying;
+            getCurrentPlaybackState(mpvWidget, _pos, currentPlaying,
+                                    currentSpeed);
 
-        mpvWidget->command(QStringList() << "seek" << "0" << "absolute");
-        sendPlaybackStateCommand(worker, 0.0, currentPlaying, currentSpeed);
-    });
+            mpvWidget->command(QStringList() << "seek" << "0" << "absolute");
+            sendPlaybackStateCommand(worker, 0.0, currentPlaying, currentSpeed,
+                                     app);
+        });
     controlLayout->addWidget(replayBtn);
 
     controlLayout->addSpacing(30);
