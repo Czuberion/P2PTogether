@@ -15,6 +15,7 @@
 #pragma once
 
 #include "p2p/peer.h"
+#include "p2p/queue.pb.h"
 #include "player/mpv_manager.h"
 #include "player/mpvwidget.h"
 #include "roles/role_store.h"
@@ -42,6 +43,10 @@ public:
     int exec(); // Renamed from runGUI to match QApplication::exec
     double playlistOriginSec() const { return m_playlistOriginSec; }
 
+    // Methods for video_panel to query queue state for button enablement
+    QList<client::p2p::QueueItem> getCurrentQueueItems() const;
+    int getCurrentPlayingIndex() const;
+
 private slots:
     // Slot to confirm netThread has started
     void onNetThreadStarted();
@@ -64,9 +69,17 @@ private:
     bool m_isCleaningUp = false; // Flag to prevent re-entrant cleanup
     QMetaObject::Connection m_seekOnLoadConnection;
 
+    // State for skip buttons
+    QList<client::p2p::QueueItem> m_currentQueueItems;
+    int m_currentPlayingIndex = -1; // Index in m_currentQueueItems
+
     void setupP2P();
     void setupUI();
     void cleanup();
+
+signals:
+    // Emitted when queue items or playing index changes
+    void queueStateChanged();
 };
 
 } // namespace gui

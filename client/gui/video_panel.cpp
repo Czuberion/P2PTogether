@@ -4,6 +4,7 @@
 #include "p2p/playback.pb.h"
 #include "player/mpv_manager.h" // Include the MpvManager header
 #include "player/mpvwidget.h"   // Include the MpvWidget header
+#include "roles/permissions.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -130,12 +131,22 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
 
     // --- Control Buttons ---
 
-    // Skip back (assuming previous item in a playlist - not implemented yet)
+    // Skip back
     QPushButton* skipBackBtn = new QPushButton("⏮");
     skipBackBtn->setFixedSize(40, 40);
     skipBackBtn->setStyleSheet("font-size: 20px; text-align: center;");
-    skipBackBtn->setToolTip("Skip to previous (NYI)");
+    skipBackBtn->setToolTip("Skip to previous");
+    skipBackBtn->setObjectName("skipBackBtn");
     controlLayout->addWidget(skipBackBtn);
+    QObject::connect(skipBackBtn, &QPushButton::clicked, [worker, app]() {
+        if (!worker || !app)
+            return;
+        client::ClientMsg msg;
+        auto* cmd = msg.mutable_queue_cmd();
+        cmd->set_type(client::p2p::QueueCmd_Type_SKIP_PREV); // Use SKIP_PREV
+        cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+        worker->send(msg);
+    });
 
     // Rewind (seek backwards)
     QPushButton* rewindBtn = new QPushButton("⏪");
@@ -209,12 +220,22 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
         });
     controlLayout->addWidget(fastForwardBtn);
 
-    // Skip forward (assuming next item in a playlist - not implemented yet)
+    // Skip forward
     QPushButton* skipForwardBtn = new QPushButton("⏭");
     skipForwardBtn->setFixedSize(40, 40);
     skipForwardBtn->setStyleSheet("font-size: 20px; text-align: center;");
-    skipForwardBtn->setToolTip("Skip to next (NYI)");
+    skipForwardBtn->setToolTip("Skip to next");
+    skipForwardBtn->setObjectName("skipForwardBtn");
     controlLayout->addWidget(skipForwardBtn);
+    QObject::connect(skipForwardBtn, &QPushButton::clicked, [worker, app]() {
+        if (!worker || !app)
+            return;
+        client::ClientMsg msg;
+        auto* cmd = msg.mutable_queue_cmd();
+        cmd->set_type(client::p2p::QueueCmd_Type_SKIP_NEXT);
+        cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+        worker->send(msg);
+    });
 
     controlLayout->addSpacing(30);
 
@@ -312,6 +333,43 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     // --- Add widgets to layout ---
     layout->addWidget(mpvWidget, 1);  // Video widget takes most space
     layout->addWidget(controlBar, 0); // Control bar at the bottom
+
+    // --- Button Enable/Disable Logic ---
+    // This lambda will be connected to App's queueStateChanged and RoleStore
+    // signals
+    auto updateSkipButtonStates = [app, skipBackBtn, skipForwardBtn, worker]() {
+        if (!app || !skipBackBtn || !skipForwardBtn)
+            return;
+
+        bool canQueue = false;
+        // Attempt to get RoleStore. This assumes RoleStore is a child of App or
+        // accessible via App. A more direct way (e.g., app->getRoleStore())
+        // would be cleaner if App provides it.
+        P2P::Roles::RoleStore* roleStore =
+            app->findChild<P2P::Roles::RoleStore*>();
+        if (roleStore) {
+            canQueue = P2P::Roles::hasPermission(
+                roleStore->getPermissionsForPeer(roleStore->getLocalPeerId()),
+                P2P::Roles::PermQueue);
+        }
+
+        QList<client::p2p::QueueItem> items = app->getCurrentQueueItems();
+        int currentIndex                    = app->getCurrentPlayingIndex();
+        int queueSize                       = items.size();
+
+        skipBackBtn->setEnabled(canQueue && currentIndex > 0 && queueSize > 0);
+        skipForwardBtn->setEnabled(canQueue && currentIndex >= 0 &&
+                                   currentIndex < queueSize - 1 &&
+                                   queueSize > 0);
+    };
+
+    // Connect to App's signal for queue/playback index changes
+    QObject::connect(app, &gui::App::queueStateChanged, videoPanel,
+                     updateSkipButtonStates);
+    // TODO: Also connect to RoleStore's signals (e.g., peerRolesChanged,
+    // localPeerIdConfirmed)
+    //       if RoleStore is accessible, or have App consolidate these signals.
+    updateSkipButtonStates(); // Call once for initial state
 
     return videoPanel;
 }

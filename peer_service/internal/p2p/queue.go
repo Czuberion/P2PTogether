@@ -184,13 +184,30 @@ func (q *Queue) GetCursor() int {
 	return q.cursor
 }
 
-// SetCursor directly sets the cursor. Used carefully, e.g., after a REMOVE or CLEAR, or seek to item.
-func (q *Queue) SetCursor(idx int) {
+// SetCursor attempts to set the cursor to the given index.
+// Returns true if the cursor was successfully set to a valid item index or -1.
+// Returns false if the index is out of bounds (and not -1).
+func (q *Queue) SetCursor(idx int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if idx >= -1 && idx < len(q.items) {
+	if idx == -1 || (idx >= 0 && idx < len(q.items)) {
 		q.cursor = idx
+		return true
 	}
+	return false
+}
+
+// RewindCursor moves the cursor to the previous item.
+// Returns true if the cursor moved to a valid item, false if it was already at the start or queue is empty.
+func (q *Queue) RewindCursor() (QueueItem, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.cursor <= 0 || len(q.items) == 0 { // Already at first item, or empty, or invalid
+		q.cursor = -1 // Ensure cursor is -1 if cannot rewind further or empty
+		return QueueItem{}, false
+	}
+	q.cursor--
+	return q.items[q.cursor], true
 }
 
 func (q *Queue) Len() int {

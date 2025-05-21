@@ -22,7 +22,7 @@ namespace gui {
 
 std::function<void()> QueueButtonsRefreshCallback;
 
-QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
+QWidget* createRightPanel(gui::App* app, P2P::Peer* peer, QMainWindow* window,
                           P2P::ControlStreamWorker* worker,
                           P2P::Roles::RoleStore* roleStore) {
     QWidget* rightPanel = new QWidget();
@@ -194,40 +194,71 @@ QWidget* createRightPanel(P2P::Peer* peer, QMainWindow* window,
                          refreshQueueButtonsVisibility();
                      });
 
+    // Lambda to refresh the QListWidget display (with play indicator)
+    auto refreshQueueListDisplay = [app, queueList, clearBtn]() {
+        if (!app || !queueList)
+            return;
+
+        queueList->clear();
+        QList<client::p2p::QueueItem> currentItems =
+            app->getCurrentQueueItems();
+        int playingIndex = app->getCurrentPlayingIndex();
+
+        for (int i = 0; i < currentItems.size(); ++i) {
+            const auto& item       = currentItems.at(i);
+            const QString fullPath = QString::fromStdString(item.file_path());
+            QString displayName    = QFileInfo(fullPath).fileName();
+
+            if (i == playingIndex) {
+                displayName = QString("[▶] ") + displayName;
+            }
+
+            auto* listItem = new QListWidgetItem(displayName);
+            listItem->setData(Qt::UserRole, fullPath); // Store full path
+            listItem->setData(Qt::UserRole + 1,
+                              QString::fromStdString(item.stored_by()));
+            listItem->setData(Qt::UserRole + 2,
+                              QString::fromStdString(item.added_by()));
+            // Store original index for potential re-identification if needed,
+            // though not used by setText directly
+            listItem->setData(Qt::UserRole + 3, i);
+            queueList->addItem(listItem);
+        }
+
+        if (clearBtn) {
+            clearBtn->setEnabled(queueList->count() > 0);
+        }
+        // Note: removeBtn and infoBtn enablement is handled by
+        // currentRowChanged signal of queueList
+    };
+
     // Connect to the worker's serverMsg signal to handle QueueUpdates
     if (worker) {
         QObject::connect(
             worker, &P2P::ControlStreamWorker::serverMsg, queueList,
-            [queueList, clearBtn](const client::ServerMsg& msg) {
+            // [queueList, clearBtn](const client::ServerMsg& msg) {
+            [app, refreshQueueListDisplay](const client::ServerMsg& msg) {
                 if (msg.payload_case() == client::ServerMsg::kQueueUpdate) {
                     qDebug() << "GUI: Received QueueUpdate";
-                    const client::p2p::QueueUpdate& update = msg.queue_update();
-                    queueList->clear();
-                    for (const auto& item : update.items()) {
-                        const QString fullPath =
-                            QString::fromStdString(item.file_path());
-                        const QString fileName = QFileInfo(fullPath).fileName();
-
-                        auto* listIt = new QListWidgetItem(fileName);
-                        listIt->setData(Qt::UserRole, fullPath);
-                        listIt->setData(
-                            Qt::UserRole + 1,
-                            QString::fromStdString(item.stored_by()));
-                        listIt->setData(
-                            Qt::UserRole + 2,
-                            QString::fromStdString(item.added_by()));
-                        queueList->addItem(listIt);
-                    }
-                    // Update clear button state after list is potentially
-                    // modified
-                    if (clearBtn) {
-                        clearBtn->setEnabled(queueList->count() > 0);
-                    }
+                    // App's onServerMessage already updates m_currentQueueItems
+                    // and emits queueStateChanged. That signal will trigger
+                    // refreshQueueListDisplay. So, no direct action needed here
+                    // on queueList, but ensure App processes kQueueUpdate
+                    // *before* right_panel might try to use stale data. For
+                    // safety, or if App's signal isn't connected yet / order
+                    // issues: refreshQueueListDisplay(); // Or rely on App's
+                    // signal
                 }
             },
             Qt::QueuedConnection); // QueuedConnection is good for cross-thread
                                    // signals
     }
+
+    // Connect to App's signal to refresh queue display when playing index or
+    // items change
+    QObject::connect(app, &gui::App::queueStateChanged, queueList,
+                     refreshQueueListDisplay);
+    refreshQueueListDisplay(); // Initial population
 
     QObject::connect(toggleQueueBtn, &QPushButton::clicked,
                      [toggleQueueBtn, queueList, queueButtonsWidget,

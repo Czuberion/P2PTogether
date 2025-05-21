@@ -15,6 +15,7 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QThread>
+#include <QTimer>
 #include <QWidget>
 #include <clocale>
 #include <stdexcept>
@@ -173,13 +174,55 @@ void App::onServerMessage(const client::ServerMsg& msg) {
         m_mpvManager->setStreamURL(m_mpvManager->getStreamURL());
         qInfo() << "App::onServerMessage: MpvManager re-triggered for URL:"
                 << m_mpvManager->getStreamURL();
+
+        // Update current playing index based on PlaylistReset
+        // This logic assumes PlaylistReset.sequence corresponds to
+        // QueueItem.first_seq when that item starts playing.
+        // Server is now expected to ensure first_seq is unique for items that
+        // start.
+        int oldPlayingIndex   = m_currentPlayingIndex;
+        m_currentPlayingIndex = -1;
+
+        // The server sets QueueItem.first_seq when an item *starts* playing.
+        // This first_seq should match the PlaylistReset.sequence.
+        // A first_seq of 0 is valid for the very first stream of a session.
+        for (int i = 0; i < m_currentQueueItems.size(); ++i) {
+            const auto& item = m_currentQueueItems.at(i);
+            // Check if first_seq is set (it will be if the item has ever been
+            // the head item that the server tried to start).
+            // And if it matches the incoming reset command's sequence.
+            // A freshly added item might have its default first_seq (0) until
+            // the server actually processes it to play.
+            // We rely on the PlaylistReset's sequence being the authoritative
+            // one for the item *currently starting*.
+            if (item.first_seq() == resetCmd.sequence()) {
+                m_currentPlayingIndex = i;
+                break;
+            }
+        }
+        if (m_currentPlayingIndex == -1 && m_currentQueueItems.size() == 1 &&
+            resetCmd.sequence() == 0) {
+            // Special case: if only one item and sequence is 0, assume it's
+            // that one.
+            m_currentPlayingIndex = 0;
+        }
+
+        if (m_currentPlayingIndex != oldPlayingIndex) {
+            emit queueStateChanged();
+        }
     } break;
-    case client::ServerMsg::kQueueUpdate: // ADD THIS CASE
-        // The actual update of the QListWidget is handled by the
-        // connection in right_panel.cpp.
-        // App itself might not need to do anything, or just log.
-        qInfo() << "App::onServerMessage: Received QueueUpdate (Type 1) - "
-                   "primarily handled by right_panel.";
+    case client::ServerMsg::kQueueUpdate:
+        m_currentQueueItems.clear();
+        for (const auto& item : msg.queue_update().items()) {
+            m_currentQueueItems.append(item);
+        }
+        // Note: currentPlayingIndex might become stale if items are
+        // removed/reordered until the next PlaylistReset. For skip buttons,
+        // this is usually fine.
+        qInfo()
+            << "App::onServerMessage: Received QueueUpdate (Type 1) - "
+               "primarily handled by right_panel. Updating App's queue cache.";
+        emit queueStateChanged(); // Emit signal as queue items list changed
         break;
     // TODO: Handle kStreamStatus, kChatMsg
     default:
@@ -315,7 +358,7 @@ void App::setupUI() {
         qWarning() << "App::setupUI: playPauseBtn not found in leftPanel!";
 
     QWidget* rightPanel =
-        createRightPanel(&peer, m_mainWindow, m_worker, m_roleStore);
+        createRightPanel(this, &peer, m_mainWindow, m_worker, m_roleStore);
     mainSplitter->addWidget(rightPanel);
     rightPanel->setMinimumWidth(300);
 
@@ -401,6 +444,19 @@ int App::exec() {
             &App::cleanup);
 
     return QApplication::exec();
+}
+
+QList<client::p2p::QueueItem> App::getCurrentQueueItems() const {
+    return m_currentQueueItems;
+}
+
+int App::getCurrentPlayingIndex() const {
+    // Re-validate index against current queue size, just in case
+    if (m_currentPlayingIndex >= 0 &&
+        m_currentPlayingIndex < m_currentQueueItems.size()) {
+        return m_currentPlayingIndex;
+    }
+    return -1;
 }
 
 } // namespace gui

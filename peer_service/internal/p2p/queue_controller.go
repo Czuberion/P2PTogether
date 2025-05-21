@@ -128,20 +128,8 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 		// After clearing, the current streamer (if any) should stop.
 		node.StopCurrentEncoder() // Explicitly stop encoder.
 	case p2ppb.QueueCmd_NEXT: // Typically server-initiated after EOF
-		// if qc.triggerDiscontinuity != nil {
-		// 	// This discontinuity is for the *next* stream if one starts.
-		// 	// The new streamer's hls.go will use this.
-		// 	log.Printf("QueueController: Marking for HLS discontinuity for the *next* stream due to NEXT command.")
-		// 	qc.triggerDiscontinuity()
-		// }
-		// if qc.q.PopHead() { // PopHead returns true if an item was popped
 		log.Printf("QueueController: Processing NEXT command from %s. Current cursor: %d", sender, qc.q.GetCursor())
 
-		// Update global media sequence with the end of the *just finished* stream.
-		// The node that sent NEXT (EOF) should have its ringbuffer's nextSeq reflect this.
-		// We assume the sender (node) will provide this.
-		// For now, let's assume the ring buffer for 'node' is the one that just finished.
-		// This logic needs refinement if sender of NEXT isn't always the finishing streamer.
 		if node != nil && node.Host.ID() == sender && node.RingBuffer() != nil {
 			qc.UpdateGlobalMediaSequence(node.RingBuffer().GetNextSeq())
 		}
@@ -149,67 +137,66 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 		newHeadItem, advanced := qc.q.AdvanceCursor()
 		if advanced {
 			madeChange = true
-			// log.Printf("QueueController: Popped head for NEXT. Queue length now %d.", qc.q.Len())
-			// // If a new item becomes head, ReactToQueueUpdate (called later) will handle starting it.
-			// // The new item will use qc.GetNextStartSequence().
-			// newHeadAfterPop, newHeadOkAfterPop := qc.q.Head()
-			// if newHeadOkAfterPop {
-			// 	// Broadcast PlaylistReset for the new upcoming stream
-			// 	// The sequence here should be the one the *new* stream will start with.
-			// 	nextStartSeq := qc.GetNextStartSequence()
-			// 	playlistResetMsg := &p2ppb.PlaylistReset{Sequence: nextStartSeq, StartPts: 0.0, HlcTs: common.GetCurrentHLC()}
-			// 	serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaylistReset{PlaylistReset: playlistResetMsg}}
-			// 	log.Printf("QueueController: Broadcasting PlaylistReset for new head %s, nextStartSeq: %d", newHeadAfterPop.FilePath, nextStartSeq)
-			// 	if hub != nil {
-			// 		hub.Broadcast(serverPayload)
-			// 	}
-			// 	if ctrlTopic != nil {
-			// 		// Publish PlaylistReset to control topic
-			// 		if marshalledMsg, err := proto.Marshal(serverPayload); err == nil {
-			// 			ctrlTopic.Publish(ctx, marshalledMsg)
 			log.Printf("QueueController: Advanced cursor for NEXT. New cursor: %d, Item: %s", qc.q.GetCursor(), newHeadItem.FilePath)
-
-			// If a new item becomes current, the *new streamer* (determined by ReactToQueueUpdate)
-			// will be responsible for resetting its RingBuffer and emitting PlaylistReset.
-			// This Handle function should not emit PlaylistReset directly for NEXT cmd.
-			// ReactToQueueUpdate (called at the end) will trigger the new streamer.
-
-			// The triggerDiscontinuity is for the HLS server that WILL serve the new stream.
-			// It should be called by the Node *when it starts streaming a new item*.
-			// So, remove direct call here. Node.EnsureRunnerState will handle it.
-
 		} else {
 			log.Println("QueueController: NEXT called, but cursor did not advance (reached end or empty). No change.")
 			// If queue becomes empty or cursor is invalid, ensure encoder stops
 			node.StopCurrentEncoder()
 		}
 
+	case p2ppb.QueueCmd_SKIP_PREV: // User-initiated skip backward
+		log.Printf("QueueController: Processing SKIP_PREV command from %s. Current cursor: %d", sender, qc.q.GetCursor())
+
+		itemBeingSkipped, wasPlaying := qc.q.Head()
+		node.StopCurrentEncoder() // Stop current playback first
+
+		if wasPlaying {
+			// If this node instance was the one streaming the item that's now being skipped.
+			// Update global sequence based on its ring buffer's state *before* rewinding.
+			if node != nil && node.Host.ID() == itemBeingSkipped.StoredBy {
+				if rb := node.RingBuffer(); rb != nil {
+					// The stream was interrupted. Its ring buffer's nextSeq is the
+					// sequence number that the *next* distinct stream should start with.
+					finishedStreamNextSeq := rb.GetNextSeq()
+					qc.UpdateGlobalMediaSequence(finishedStreamNextSeq)
+					log.Printf("QueueController: Updated global media sequence to %d after stopping stream for %s (skipped by PREVIOUS)", qc.currentMediaSequence, itemBeingSkipped.FilePath)
+				}
+			}
+		}
+
+		newHeadItem, rewound := qc.q.RewindCursor()
+		if rewound {
+			madeChange = true
+			log.Printf("QueueController: Rewound cursor for SKIP_PREV cmd. New cursor: %d, Item: %s", qc.q.GetCursor(), newHeadItem.FilePath)
+		} else {
+			log.Printf("QueueController: SKIP_PREV cmd, but cursor did not rewind (at start or empty). Cursor: %d. No change.", qc.q.GetCursor())
+		}
+
 	case p2ppb.QueueCmd_SKIP_NEXT: // User-initiated skip
 		// Permission already checked.
 		// Stop the current encoder *before* advancing the cursor.
+		log.Printf("QueueController: Processing SKIP_NEXT command from %s. Current cursor: %d", sender, qc.q.GetCursor())
+
+		itemBeingSkipped, wasPlaying := qc.q.Head()
 		node.StopCurrentEncoder()
 
-		// Similar to NEXT, advance cursor.
-		// The new streamer (if any) will handle PlaylistReset and discontinuity.
-		log.Printf("QueueController: Processing SKIP_NEXT command from %s. Current cursor: %d", sender, qc.q.GetCursor())
-		if node != nil && node.Host.ID() == sender && node.RingBuffer() != nil {
-			qc.UpdateGlobalMediaSequence(node.RingBuffer().GetNextSeq())
+		if wasPlaying {
+			if node != nil && node.Host.ID() == itemBeingSkipped.StoredBy {
+				if rb := node.RingBuffer(); rb != nil {
+					finishedStreamNextSeq := rb.GetNextSeq()
+					qc.UpdateGlobalMediaSequence(finishedStreamNextSeq)
+					log.Printf("QueueController: Updated global media sequence to %d after stopping stream for %s (skipped by NEXT)", qc.currentMediaSequence, itemBeingSkipped.FilePath)
+				}
+			}
 		}
+
 		newHeadItemAfterSkip, advancedSkip := qc.q.AdvanceCursor()
 		if advancedSkip {
 			madeChange = true
 			log.Printf("QueueController: Advanced cursor for SKIP_NEXT. New cursor: %d, Item: %s", qc.q.GetCursor(), newHeadItemAfterSkip.FilePath)
 		} else {
-			log.Println("QueueController: SKIP_NEXT called, but cursor did not advance. No change.")
+			log.Printf("QueueController: SKIP_NEXT called, but cursor did not advance (at end or empty). Cursor: %d. No change.", qc.q.GetCursor())
 		}
-		// 			}
-		// 		}
-		// 	}
-		// } else {
-		// 	log.Println("QueueController: NEXT called on empty or single-item queue, no change after pop.")
-		// 	// If queue becomes empty, ensure encoder stops
-		// 	node.StopCurrentEncoder()
-		// }
 	default:
 		return fmt.Errorf("unknown QueueCmd type: %v", cmd.Type)
 	}
