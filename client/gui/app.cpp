@@ -27,7 +27,9 @@ App::App(quint16 grpcPort, QObject* parent) :
     QObject(parent),
     m_grpcPort(grpcPort),
     m_lastAppliedPlaybackHlc(-1),
-    m_playlistOriginSec(0.0) {
+    m_playlistOriginSec(0.0),
+    m_activePlaylistSequenceId(0),
+    m_playbackCompletedCurrentStream(false) {
     // Initialize other members to nullptr or default values if necessary
     m_roleStore =
         new P2P::Roles::RoleStore(this); // Parent to App for auto-deletion
@@ -68,11 +70,25 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             break;
         }
         const auto& cmd = msg.playback_state_cmd();
-        qInfo() << "Received PlaybackStateCmd HLC:" << cmd.hlc_ts()
+        qInfo() << "Received PlaybackStateCmd for stream_sequence_id:"
+                << cmd.stream_sequence_id() << "HLC:" << cmd.hlc_ts()
                 << " vs LastApplied:" << m_lastAppliedPlaybackHlc;
 
+        // CRITICAL: Check if the command is for the currently active stream
+        // sequence. This prevents applying a playback command for a previous
+        // item after a PlaylistReset for a new item has already occurred.
+        if (cmd.stream_sequence_id() != m_activePlaylistSequenceId) {
+            qInfo()
+                << "Ignoring PlaybackStateCmd because its stream_sequence_id ("
+                << cmd.stream_sequence_id()
+                << ") does not match current active stream_sequence_id ("
+                << m_activePlaylistSequenceId << "). HLC was " << cmd.hlc_ts();
+            break;
+        }
+
         if (cmd.hlc_ts() > m_lastAppliedPlaybackHlc) {
-            qInfo() << "Applying received PlaybackStateCmd: Play"
+            qInfo() << "Applying PlaybackStateCmd for active stream "
+                    << m_activePlaylistSequenceId << ": Play"
                     << cmd.target_is_playing() << "Pos" << cmd.target_time_pos()
                     << "Speed" << cmd.target_speed();
 
@@ -107,7 +123,9 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             // now, simple HLC comparison is fine.
             m_lastAppliedPlaybackHlc = cmd.hlc_ts();
         } else {
-            qInfo() << "Ignoring stale PlaybackStateCmd HLC:" << cmd.hlc_ts();
+            qInfo() << "Ignoring stale PlaybackStateCmd for stream "
+                    << cmd.stream_sequence_id() << "due to HLC:" << cmd.hlc_ts()
+                    << " <= " << m_lastAppliedPlaybackHlc;
         }
     } break;
     case client::ServerMsg::kPlaylistReset: {
@@ -122,14 +140,21 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                 << "OriginSec" << resetCmd.origin_sec();
 
         m_playlistOriginSec = resetCmd.origin_sec(); // Store new origin
+        m_activePlaylistSequenceId =
+            resetCmd.sequence(); // PlaylistReset.sequence IS the stream/queue
+                                 // item ID
         m_lastAppliedPlaybackHlc =
             resetCmd.hlc_ts(); // Update HLC for this authoritative event
-        qInfo() << "App::onServerMessage: m_playlistOriginSec set to"
-                << m_playlistOriginSec << "m_lastAppliedPlaybackHlc set to"
-                << m_lastAppliedPlaybackHlc;
+        qInfo()
+            << "App::onServerMessage: After PlaylistReset: m_playlistOriginSec="
+            << m_playlistOriginSec
+            << ", m_activePlaylistSequenceId=" << m_activePlaylistSequenceId
+            << ", m_lastAppliedPlaybackHlc=" << m_lastAppliedPlaybackHlc;
 
         // Disconnect any previous one-shot seek connection to avoid multiple
         // triggers
+        m_playbackCompletedCurrentStream =
+            false; // Reset completion flag for the new stream
         if (m_seekOnLoadConnection) {
             qInfo() << "App::onServerMessage: Disconnecting previous "
                        "m_seekOnLoadConnection.";
@@ -195,13 +220,15 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             // the server actually processes it to play.
             // We rely on the PlaylistReset's sequence being the authoritative
             // one for the item *currently starting*.
-            if (item.first_seq() == resetCmd.sequence()) {
+            if (item.first_seq() ==
+                m_activePlaylistSequenceId) { // Match against the new active
+                                              // stream sequence
                 m_currentPlayingIndex = i;
                 break;
             }
         }
         if (m_currentPlayingIndex == -1 && m_currentQueueItems.size() == 1 &&
-            resetCmd.sequence() == 0) {
+            m_activePlaylistSequenceId == 0) {
             // Special case: if only one item and sequence is 0, assume it's
             // that one.
             m_currentPlayingIndex = 0;
@@ -351,6 +378,16 @@ void App::setupUI() {
     if (!m_mpvWidget)
         qWarning() << "App::setupUI: MpvWidget not found in leftPanel!";
     if (mpvManager) {
+        // Connect MpvWidget's actualFileEnded signal
+        if (m_mpvWidget) {
+            connect(m_mpvWidget, &player::MpvWidget::actualFileEnded, this,
+                    &App::onLocalPlayerFileEnded);
+            connect(m_mpvWidget, &player::MpvWidget::positionChanged, this,
+                    &App::onMpvPositionChanged);
+        } else {
+            qWarning() << "App::setupUI: MpvWidget is null, cannot connect "
+                          "actualFileEnded signal.";
+        }
         m_mpvManager = mpvManager;
     }
     m_playPauseBtn = leftPanel->findChild<QPushButton*>("playPauseBtn");
@@ -457,6 +494,133 @@ int App::getCurrentPlayingIndex() const {
         return m_currentPlayingIndex;
     }
     return -1;
+}
+
+uint32_t App::getCurrentStreamSequenceId() const {
+    return m_activePlaylistSequenceId;
+}
+
+void App::onMpvPositionChanged(double newPosition) {
+    if (m_playbackCompletedCurrentStream || !m_mpvWidget ||
+        m_currentPlayingIndex < 0 ||
+        m_currentPlayingIndex >= m_currentQueueItems.size()) {
+        return;
+    }
+
+    const auto& currentItem = m_currentQueueItems.at(m_currentPlayingIndex);
+    if (currentItem.first_seq() != m_activePlaylistSequenceId) {
+        // Not playing the item we think we are, or item data not yet synced
+        // for current active stream
+        return;
+    }
+
+    // Get relevant properties from MpvWidget
+    double mpvDuration = m_mpvWidget->getProperty("duration")
+                             .toDouble(); // Total duration of the current
+                                          // playlist content as seen by mpv
+    bool isPausedByUser = m_mpvWidget->getProperty("pause").toBool();
+    bool isBuffering    = m_mpvWidget->getProperty("paused-for-cache")
+                           .toBool(); // True if paused due to cache running out
+    bool coreIdle =
+        m_mpvWidget->getProperty("core-idle")
+            .toBool(); // True if playback is finished or nothing to play
+    double playbackTime = m_mpvWidget->getProperty("playback-time").toDouble();
+
+    qDebug() << "onMpvPositionChanged - Pos:" << newPosition
+             << "PlaybackTime:" << playbackTime
+             << "ActiveSeq:" << m_activePlaylistSequenceId
+             << "ItemNumSegs:" << currentItem.num_segs()
+             << "MpvDuration:" << mpvDuration
+             << "PausedByUser:" << isPausedByUser << "Buffering:" << isBuffering
+             << "CoreIdle:" << coreIdle;
+
+    bool effectiveEOF = false;
+
+    if (coreIdle &&
+        playbackTime > 0) { // If core is idle and we've played something
+        qInfo() << "App::onMpvPositionChanged: MPV core is idle, considering "
+                   "this EOF for stream "
+                << m_activePlaylistSequenceId;
+        effectiveEOF = true;
+    } else if (currentItem.num_segs() >
+               0) { // Only proceed if we have num_segs to calculate a duration
+        double calculatedDurationFromSegs =
+            static_cast<double>(currentItem.num_segs()) *
+            2.0; // Nominal segment duration = 2s
+        double durationToCompare =
+            (mpvDuration > 1.0 &&
+             mpvDuration <= calculatedDurationFromSegs + 2.0)
+                ? mpvDuration
+                : calculatedDurationFromSegs; // Prefer mpvDuration if sane
+
+        if (durationToCompare > 0) {
+            if (isBuffering && (playbackTime >= durationToCompare - 1.0 ||
+                                newPosition >= durationToCompare - 1.0)) {
+                qInfo()
+                    << "App::onMpvPositionChanged: Buffering near end of stream"
+                    << m_activePlaylistSequenceId << ". Pos:" << newPosition
+                    << ", PlaybackTime: " << playbackTime
+                    << ", EffectiveDuration:" << durationToCompare;
+                effectiveEOF = true;
+            } else if (!isPausedByUser && !isBuffering &&
+                       (newPosition >= durationToCompare - 0.2)) {
+                qInfo() << "App::onMpvPositionChanged: Position very near end "
+                           "of stream"
+                        << m_activePlaylistSequenceId << ". Pos:" << newPosition
+                        << ", EffectiveDuration:" << durationToCompare;
+                effectiveEOF = true;
+            }
+        }
+    }
+
+    if (effectiveEOF) {
+        if (!m_playbackCompletedCurrentStream) {
+            qInfo() << "App::onMpvPositionChanged: Effective EOF *confirmed* "
+                       "for stream"
+                    << m_activePlaylistSequenceId;
+            onLocalPlayerFileEnded();
+        }
+    }
+}
+
+void App::onLocalPlayerFileEnded() {
+    // This function can be called by:
+    // 1. MpvWidget emitting actualFileEnded (from MPV_EVENT_END_FILE)
+    // 2. onMpvPositionChanged detecting effective EOF
+
+    if (m_playbackCompletedCurrentStream) {
+        qInfo() << "App::onLocalPlayerFileEnded: Completion already reported "
+                   "for current stream"
+                << m_activePlaylistSequenceId;
+        return;
+    }
+    uint32_t endedStreamSeqId =
+        getCurrentStreamSequenceId(); // Get the ID of the stream that just
+                                      // ended
+
+    qInfo() << "App::onLocalPlayerFileEnded: Reporting end of file for "
+               "streamSequenceId:"
+            << endedStreamSeqId;
+
+    m_playbackCompletedCurrentStream =
+        true; // Set flag HERE, as this is the point of action
+
+    if (!m_worker) {
+        qWarning() << "App::onLocalPlayerFileEnded: m_worker is null, cannot "
+                      "send PlaybackStreamCompleted.";
+        return;
+    }
+
+    client::ClientMsg clientMsg;
+    client::p2p::PlaybackStreamCompleted* cmd =
+        clientMsg.mutable_playback_stream_completed_cmd();
+    cmd->set_stream_sequence_id(endedStreamSeqId);
+    cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+
+    qInfo() << "App::onLocalPlayerFileEnded: Sending PlaybackStreamCompleted "
+               "for streamSequenceId:"
+            << endedStreamSeqId;
+    m_worker->send(clientMsg);
 }
 
 } // namespace gui

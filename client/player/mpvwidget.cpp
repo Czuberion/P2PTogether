@@ -117,15 +117,26 @@ void MpvWidget::handle_mpv_event(mpv_event* event) {
         mpv_event_property* prop = (mpv_event_property*)event->data;
         if (strcmp(prop->name, "time-pos") == 0) {
             if (prop->format == MPV_FORMAT_DOUBLE) {
-                double time = *(double*)prop->data;
+                double time = *static_cast<double*>(prop->data);
                 Q_EMIT positionChanged(time);
             }
         } else if (strcmp(prop->name, "duration") == 0) {
             if (prop->format == MPV_FORMAT_DOUBLE) {
-                double time = *(double*)prop->data;
+                double time = *static_cast<double*>(prop->data);
                 Q_EMIT durationChanged(time);
             }
         }
+        break;
+    }
+    case MPV_EVENT_END_FILE: {
+        mpv_event_end_file* end_file_data =
+            static_cast<mpv_event_end_file*>(event->data);
+        qWarning() << "MpvWidget: MPV_EVENT_END_FILE received! Reason:"
+                   << end_file_data->reason << "Error:"
+                   << (end_file_data->error != 0
+                           ? mpv_error_string(end_file_data->error)
+                           : "none");
+        Q_EMIT actualFileEnded();
         break;
     }
     default:;

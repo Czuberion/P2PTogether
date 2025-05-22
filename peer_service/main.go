@@ -151,6 +151,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_PlaybackStateCmd); ok {
 			hlc = cmdPl.PlaybackStateCmd.HlcTs
 			cmdTypeString = fmt.Sprintf("SetPlaybackStateCmd (Playing: %v, Pos: %.2f, Speed: %.2f)", cmdPl.PlaybackStateCmd.TargetIsPlaying, cmdPl.PlaybackStateCmd.TargetTimePos, cmdPl.PlaybackStateCmd.TargetSpeed)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_PlaybackStreamCompletedCmd); ok {
+			hlc = cmdPl.PlaybackStreamCompletedCmd.HlcTs
+			cmdTypeString = fmt.Sprintf("PlaybackStreamCompletedCmd (StreamSeq: %d)", cmdPl.PlaybackStreamCompletedCmd.StreamSequenceId)
 		} else {
 			cmdTypeString = fmt.Sprintf("Unknown type %T", clientMsg.Payload)
 		}
@@ -164,6 +167,7 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 		case *clientpb.ClientMsg_PlaybackStateCmd: // Updated for SetPlaybackStateCmd
 			pbCmd := cmd.PlaybackStateCmd
+			s.queueCtrl.UpdateLastKnownPlaybackState(pbCmd) // Update QC's view
 			// Permission Check: Any relevant playback permission allows sending state updates
 			senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
 			permissionOK := senderPerms.Has(roles.PermPlayPause) ||
@@ -192,6 +196,11 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		case *clientpb.ClientMsg_RemoveRoleCmd:
 			log.Printf("Received RemoveRoleCmd (HLC: %d) from %s for role %s", cmd.RemoveRoleCmd.HlcTs, nodeIDStr, cmd.RemoveRoleCmd.RoleName)
 			s.handleRemoveRoleCmd(stream.Context(), cmd.RemoveRoleCmd, senderID)
+
+		case *clientpb.ClientMsg_PlaybackStreamCompletedCmd:
+			pbStreamCompletedCmd := cmd.PlaybackStreamCompletedCmd // This is a pointer
+			log.Printf("[gRPC Recv %s] Processing PlaybackStreamCompletedCmd for stream %d, HLC: %d", nodeIDStr, pbStreamCompletedCmd.StreamSequenceId, pbStreamCompletedCmd.HlcTs)
+			s.queueCtrl.NotifyPlayerStreamCompleted(pbStreamCompletedCmd.StreamSequenceId, senderID)
 
 		default:
 			log.Printf("[gRPC Recv %s] Unhandled ClientMsg payload type: %T", nodeIDStr, clientMsg.Payload)
@@ -441,7 +450,7 @@ func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, 
 		case *clientpb.ServerMsg_AllPeerRoleAssignments:
 			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_PlaybackStateCmd:
-			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, srv.hub)
+			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, srv)
 		default:
 			log.Printf("[gossip Ctrl] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
 		}
@@ -546,10 +555,19 @@ func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, 
 }
 
 // handleGossipPlaybackStateCmd forwards a SetPlaybackStateCmd received via GossipSub to the local GUI via the Hub.
-func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, hub *p2p.Hub) {
-	log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d) from %s. Broadcasting to local hub.", cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, from)
+//
+//	func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, hub *p2p.Hub) {
+//		log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d) from %s. Broadcasting to local hub.", cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, from)
+func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, srv *server) {
+	log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d StreamSeq: %d) from %s.",
+		cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, cmd.StreamSequenceId, from)
+
+	// Update QueueController's state *before* broadcasting to local GUI.
+	srv.queueCtrl.UpdateLastKnownPlaybackState(cmd)
+
 	serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaybackStateCmd{PlaybackStateCmd: cmd}} // Updated ServerMsg field
-	hub.Broadcast(serverMsg)                                                                               // Send to the connected GUI client(s)
+
+	srv.hub.Broadcast(serverMsg) // Send to the connected GUI client(s)
 }
 
 // processSegmentEvents listens for new segments from the local RingBuffer (written by ffmpeg via IngestHandler),
@@ -777,6 +795,8 @@ func main() {
 	// session‑scoped topics – stub “default” until sessions exist
 	chatTopic, _ := ps.Join("/p2ptogether/chat/default")
 	ctrlTopic, _ := ps.Join("/p2ptogether/control/default")
+
+	queueCtrl.SetDependencies(node, hub, roleManager, ctrlTopic)
 
 	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
 

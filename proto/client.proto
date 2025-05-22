@@ -36,6 +36,7 @@ message ClientMsg {
     client.p2p.SetPeerRolesCmd set_peer_roles_cmd = 4;
     client.p2p.UpdateRoleCmd update_role_cmd = 5;
     client.p2p.RemoveRoleCmd remove_role_cmd = 6;
+    client.p2p.PlaybackStreamCompleted playback_stream_completed_cmd = 7;
   }
 }
 

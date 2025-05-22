@@ -14,4 +14,15 @@ message SetPlaybackStateCmd {
   double target_speed = 3;
   // Hybrid Logical Clock timestamp for ordering this state command.
   int64 hlc_ts = 4;
+  // The sequence ID of the playlist item this command pertains to.
+  // Matches PlaylistReset.sequence or QueueItem.first_seq.
+  uint32 stream_sequence_id = 5;
+}
+
+// Sent by a client when its local player has finished playing a stream.
+message PlaybackStreamCompleted {
+  // The sequence ID of the stream that completed.
+  uint32 stream_sequence_id = 1;
+  // Client's HLC timestamp for this event.
+  int64 hlc_ts = 2;
 }

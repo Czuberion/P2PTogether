@@ -136,30 +136,22 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 		// --- New logic for starting a new file ---
 		// This block executes if we are `shouldRun` and either not running, or running wrong file/seq.
 
-		// 1. Calculate firstSeq for this new stream instance.
-		//    This should come from the global media sequence managed by QueueController.
-		currentGlobalMediaSequence := qc.GetNextStartSequence()
-		calculatedFirstSeq := currentGlobalMediaSequence
-		// In a more advanced model, if seqBase was part of headItem and non-zero, use that.
-		// For now, always use the global sequence.
+		// Calculate originSec for this item.
+		calculatedOriginSec := float64(seqBase) * media.SegmentDuration.Seconds() // Assuming start_pts is 0 for a new file
 
-		// 2. Calculate originSec for this item.
-		//    start_pts for a new item is typically 0.
-		calculatedOriginSec := float64(calculatedFirstSeq) * media.SegmentDuration.Seconds() // Assuming start_pts is 0
-
-		// 3. Update the QueueItem in the QueueController's queue with first_seq. NumSegs should already be there.
-		//    This is critical so that other parts of the system (like seek logic) know this item's mapping.
-		//    The `head` variable here is from qc.Q().Head() before the Node.mu lock.
-		//    We need to get the current head again or ensure `filePath` matches current head.
+		// Update the QueueItem in the QueueController's queue with first_seq. NumSegs should already be there.
+		// This is critical so that other parts of the system (like seek logic) know this item's mapping.
+		// The `head` variable here is from qc.Q().Head() before the Node.mu lock.
+		// We need to get the current head again or ensure `filePath` matches current head.
 		log.Printf("Node.EnsureRunnerState: [%s] Attempting to update QueueItem FirstSeq...", n.ID())
 		if currentHeadItem, ok := qc.Q().Head(); ok {
-			currentHeadItem.FirstSeq = calculatedFirstSeq
+			currentHeadItem.FirstSeq = seqBase
 			// currentHeadItem.NumSegs is assumed to be set on APPEND.
 			qc.Q().SetItemAtCursor(currentHeadItem) // Updates the item at the current cursor
 
 			// After updating the item, broadcast new QueueUpdate
 			if localHub := n.hubRef; localHub != nil { // n.hubRef should be qc.hubRef if passed consistently
-				log.Printf("Node.EnsureRunnerState: [%s] Broadcasting QueueUpdate after setting FirstSeq for %s to %d", n.ID(), filePath, calculatedFirstSeq)
+				log.Printf("Node.EnsureRunnerState: [%s] Broadcasting QueueUpdate after setting FirstSeq for %s to %d", n.ID(), filePath, seqBase)
 				localHub.Broadcast(qc.Snapshot()) // qc.Snapshot() will reflect the updated item
 				log.Printf("Node.EnsureRunnerState: [%s] Broadcasted QueueUpdate to localHub.", n.ID())
 			}
@@ -180,7 +172,7 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 			} else {
 				log.Printf("Node.EnsureRunnerState: [%s] ctrlTopic is NIL, cannot publish QueueUpdate.", n.ID())
 			}
-			log.Printf("Node.EnsureRunnerState: [%s] QueueItem FirstSeq updated for %s to %d.", n.ID(), filePath, calculatedFirstSeq)
+			log.Printf("Node.EnsureRunnerState: [%s] QueueItem FirstSeq updated for %s to %d.", n.ID(), filePath, seqBase)
 		} else {
 			log.Printf("Node.EnsureRunnerState: [%s] Could not update QueueItem for %s; head mismatch or queue empty.", n.ID(), filePath)
 		}
@@ -202,30 +194,29 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 		// }
 		log.Printf("Node.EnsureRunnerState: [%s] Existing runner (if any) cancellation requested.", n.ID())
 
-		// 4. Reset this node's RingBuffer with the new firstSeq.
+		// Reset this node's RingBuffer with the new firstSeq.
 		if n.ringBuffer != nil {
-			log.Printf("Node.EnsureRunnerState: [%s] Resetting RingBuffer to new base sequence: %d for file %s", n.ID(), calculatedFirstSeq, filePath)
-			n.ringBuffer.Reset(calculatedFirstSeq)
+			log.Printf("Node.EnsureRunnerState: [%s] Resetting RingBuffer to new base sequence: %d for file %s", n.ID(), seqBase, filePath)
+			n.ringBuffer.Reset(seqBase)
 		}
 		// Trigger HLS discontinuity if this node is starting a new stream.
 		if qc.triggerDiscontinuity != nil { // qc is n.queueControllerRef
-			log.Printf("Node.EnsureRunnerState: [%s] Triggering HLS discontinuity for new stream %s (new firstSeq %d)", n.ID(), filePath, calculatedFirstSeq)
+			log.Printf("Node.EnsureRunnerState: [%s] Triggering HLS discontinuity for new stream %s (new firstSeq %d)", n.ID(), filePath, seqBase)
 			qc.triggerDiscontinuity()
 		}
 		log.Printf("Node.EnsureRunnerState: [%s] RingBuffer reset and discontinuity triggered.", n.ID())
 
-		// 5. Emit PlaylistReset
+		// Emit PlaylistReset
 		playlistResetMsg := &p2ppb.PlaylistReset{
-			Sequence:  calculatedFirstSeq,
+			Sequence:  seqBase,
 			StartPts:  0.0, // New files start at 0.0 relative to their own content
 			OriginSec: calculatedOriginSec,
 			HlcTs:     common.GetCurrentHLC(),
 		}
 		// Use context.Background() for broadcasts not tied to a specific runner's lifecycle.
-		// broadcastCtx is already defined above for the QueueUpdate broadcast. We can reuse it.
-		broadcastCtx := context.Background() // Not needed if already defined
+		broadcastCtx := context.Background()
 		serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaylistReset{PlaylistReset: playlistResetMsg}}
-		log.Printf("Node.EnsureRunnerState: [%s] Broadcasting PlaylistReset for %s. Sequence: %d, OriginSec: %.2f", n.ID(), filePath, calculatedFirstSeq, calculatedOriginSec)
+		log.Printf("Node.EnsureRunnerState: [%s] Broadcasting PlaylistReset for %s. Sequence: %d, OriginSec: %.2f", n.ID(), filePath, seqBase, calculatedOriginSec)
 		if hub := n.hubRef; hub != nil {
 			hub.Broadcast(serverPayload)
 		} // n.hubRef is qc.hubRef
@@ -244,8 +235,7 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 		}
 		log.Printf("Node.EnsureRunnerState: [%s] PlaylistReset broadcast initiated.", n.ID())
 
-		targetSeqForRunner := calculatedFirstSeq
-		log.Printf("Node.EnsureRunnerState: [%s] Preparing to start new runner for %s, actual seqBase for ffmpeg: %d.", n.ID(), filePath, targetSeqForRunner)
+		log.Printf("Node.EnsureRunnerState: [%s] Preparing to start new runner for %s, actual seqBase for ffmpeg: %d.", n.ID(), filePath, seqBase)
 		newCtx, newCancel := context.WithCancel(context.Background())
 		n.runnerCtx = newCtx
 		n.runnerCancel = newCancel
@@ -255,8 +245,8 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 		localRunner := n.encoderRunner
 		localNodeID := n.ID()
 		localQC := qc
-		localRM := rm
-		localHub := n.hubRef
+		// localRM := rm
+		// localHub := n.hubRef
 
 		n.mu.Unlock() // Unlock Node.mu before starting the goroutine
 
@@ -280,52 +270,26 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 			n.mu.Unlock()         // Unlock Node
 
 			if runErr == nil && ctx.Err() == nil { // Successful EOF & context not cancelled during run
-				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) finished with EOF. Triggering QueueCmd_NEXT.", path, seq)
+				finishedStreamSeqId := seq // The sequence ID of the stream whose encoder just finished
+				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) finished with EOF. Notifying QueueController.", path, finishedStreamSeqId)
 
 				// Report the next sequence number from this stream to the QueueController
-				// so it can update the global media sequence for the *next* streamer.
 				if runner != nil && localQC != nil { // runner is n.encoderRunner
-					// localQC.UpdateGlobalMediaSequence(n.ringBuffer.GetNextSeq()) // Use node's ringbuffer's nextSeq
-					// Read ringBuffer under Node's lock
 					if n.ringBuffer != nil {
 						finishedStreamNextSeq := n.ringBuffer.GetNextSeq()
 						localQC.UpdateGlobalMediaSequence(finishedStreamNextSeq)
+						log.Printf("Node.EnsureRunnerState: Goroutine: Updated global media sequence to %d after encoder EOF for stream %d.", finishedStreamNextSeq, finishedStreamSeqId)
 					}
+					// Notify QueueController that this encoder has finished its part.
+					localQC.NotifyEncoderFinished(finishedStreamSeqId, localNodeID)
 				}
-
-				// Use the captured localQC, localRM, localHub
-				// For ctrlTopic, read it dynamically using the getter to ensure it's current,
-				// as AttachPubSub could be called.
-				var currentCtrlTopic *pubsub.Topic
-				n.mu.RLock() // Lock to safely read n.ctrlTopic
-				currentCtrlTopic = n.ctrlTopic
-				n.mu.RUnlock()
-
-				if localQC == nil || localRM == nil || localHub == nil || currentCtrlTopic == nil {
-					log.Printf("Node.EnsureRunnerState: Goroutine: Missing dependencies to trigger NEXT for %s. qcIsNil:%v, rmIsNil:%v, hubIsNil:%v, topicIsNil:%v", path, localQC == nil, localRM == nil, localHub == nil, currentCtrlTopic == nil)
-					return
-				}
-
-				nextCmd := &p2ppb.QueueCmd{
-					Type:  p2ppb.QueueCmd_NEXT,
-					HlcTs: common.GetCurrentHLC(),
-				}
-				// Use a new context for Handle, as the runner's ctx might be done.
-				// Or pass context.Background() if Handle doesn't need specific cancellation from here.
-				// err := currentQC.Handle(context.Background(), nextCmd, localNodeID, currentRM, currentHub, n, currentCtrlTopic)
-				err := localQC.Handle(context.Background(), nextCmd, localNodeID, localRM, localHub, n, currentCtrlTopic)
-				if err != nil {
-					log.Printf("Node.EnsureRunnerState: Goroutine: Error triggering QueueCmd_NEXT for %s: %v", path, err)
-				}
-			} else if runErr == context.Canceled {
-				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) was cancelled.", path, seq)
+			} else if runErr == context.Canceled || (ctx.Err() != nil && runErr != nil) {
+				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) was cancelled (runErr: %v, ctx.Err: %v).", path, seq, runErr, ctx.Err())
 			} else {
 				log.Printf("Node.EnsureRunnerState: Goroutine: Encoder for %s (seq %d) exited with error: %v", path, seq, runErr)
 				// Consider if any queue action is needed on other errors (e.g., skip item)
 			}
-			// }(n.runnerCtx, filePath, seqBase, localRunner)
-		}(n.runnerCtx, filePath, targetSeqForRunner, localRunner) // Pass targetSeqForRunner
-		// }
+		}(n.runnerCtx, filePath, seqBase, localRunner)
 
 	} else { // Should not be running
 		if isRunning {

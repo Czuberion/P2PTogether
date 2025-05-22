@@ -46,11 +46,14 @@ public:
     // Methods for video_panel to query queue state for button enablement
     QList<client::p2p::QueueItem> getCurrentQueueItems() const;
     int getCurrentPlayingIndex() const;
+    uint32_t getCurrentStreamSequenceId() const;
 
 private slots:
     // Slot to confirm netThread has started
     void onNetThreadStarted();
     void onServerMessage(const client::ServerMsg& msg);
+    void onMpvPositionChanged(double newPosition);
+    void onLocalPlayerFileEnded();
 
 private:
     quint16 m_grpcPort;
@@ -72,6 +75,10 @@ private:
     // State for skip buttons
     QList<client::p2p::QueueItem> m_currentQueueItems;
     int m_currentPlayingIndex = -1; // Index in m_currentQueueItems
+    // Sequence ID from the latest PlaylistReset
+    uint32_t m_activePlaylistSequenceId = 0;
+    bool m_playbackCompletedCurrentStream =
+        false; // Prevent multiple EOF reports
 
     void setupP2P();
     void setupUI();

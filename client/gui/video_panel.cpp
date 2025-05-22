@@ -58,6 +58,9 @@ sendPlaybackStateCommand(P2P::ControlStreamWorker* worker,
     cmd->set_target_time_pos(localTargetPos + originSec);
     cmd->set_target_is_playing(targetIsPlaying);
     cmd->set_target_speed(targetSpeed);
+    // Use 0 if appInstance is null or seqId not available
+    cmd->set_stream_sequence_id(
+        appInstance ? appInstance->getCurrentStreamSequenceId() : 0);
     cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch()); // Set HLC timestamp
     worker->send(clientMsg);
     // qDebug() << "Sent SetPlaybackStateCmd: Pos" << targetPos << "Playing"

@@ -31,8 +31,9 @@ public:
     QVariant getProperty(const QString& name) const;
     QSize sizeHint() const override { return {}; }
 Q_SIGNALS:
-    void durationChanged(int value);
-    void positionChanged(int value);
+    void durationChanged(double value);
+    void positionChanged(double value);
+    void actualFileEnded();
 
 protected:
     void initializeGL() Q_DECL_OVERRIDE;
