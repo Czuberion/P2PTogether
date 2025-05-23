@@ -618,8 +618,9 @@ func (s *server) processSegmentEvents(ctx context.Context, rb *media.RingBuffer)
 			}
 
 			videoMsg := &p2ppb.VideoSegmentGossip{ // Use the p2ppb alias
-				SequenceNumber: event.Seq,
-				Data:           segmentData,
+				SequenceNumber:        event.Seq,
+				Data:                  segmentData,
+				ActualDurationSeconds: rb.GetSegmentActualDuration(event.Seq),
 			}
 			marshalledVideoMsg, err := proto.Marshal(videoMsg)
 			if err != nil {
@@ -681,7 +682,7 @@ func (s *server) processVideoSegmentMessages(ctx context.Context, sub *pubsub.Su
 		// to prevent re-publishing them if this node *also* happens to be the streamer
 		// (though that's less likely if only one streamer, but good for safety).
 		rb.SetPublishEvents(false)
-		rb.WriteAt(videoSegment.SequenceNumber, videoSegment.Data, 0)
+		rb.WriteAt(videoSegment.SequenceNumber, videoSegment.Data, 0, videoSegment.ActualDurationSeconds)
 		rb.SetPublishEvents(true) // Re-enable for segments from local ffmpeg
 
 		log.Printf("[gossip VideoReceive] Received and stored video segment %d (%d bytes) from %s.", videoSegment.SequenceNumber, len(videoSegment.Data), msg.ReceivedFrom)
@@ -714,8 +715,6 @@ func main() {
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/stream.m3u8", plH)
-	// httpMux.HandleFunc("/seg_", segH) // matches /seg_<seq>.ts
-	httpMux.HandleFunc("/ingest/", media.IngestHandler(rb))
 	httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/seg_") && strings.HasSuffix(r.URL.Path, ".ts"):
@@ -823,6 +822,9 @@ func main() {
 		triggerHLSDircontinuity: triggerDiscontinuity,
 	}
 	clientpb.RegisterP2PTClientServer(grpcServer, srvInstance)
+
+	// Register IngestHandler with the fully initialized node (which can provide durations)
+	httpMux.HandleFunc("/ingest/", media.IngestHandler(rb, srvInstance.node))
 
 	subVideo, err := node.VideoTopic().Subscribe()
 	if err != nil {

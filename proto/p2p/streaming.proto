@@ -20,6 +20,10 @@ message VideoSegmentGossip {
   // int64 pts_timestamp_ms = 4;  // Optional: If finer-grained PTS is needed
   // bool is_discontinuity = 5; // Optional: If explicit discontinuity signal is
   // needed here
+
+  // Precise duration of this segment in seconds, as determined by the
+  // streamer's ffmpeg.
+  double actual_duration_seconds = 3;
 }
 
 message PlaylistReset {

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"time"
 
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
@@ -22,11 +23,12 @@ type Config struct {
 	AudioBitrate   string // AAC audio bitrate.
 	GOPCeiling     int    // Hard upper bound for key-frame interval. [frames]
 	HlsIngestURL   string // Base URL for HLS segment ingest (e.g., "http://127.0.0.1:PORT")
+	PlaylistPath   string // Full path where ffmpeg should write its M3U8 playlist file
 }
 
 // DefaultConfig returns sensible low-latency defaults.
 // 2s segments, veryfast preset, zerolatency tune, 128k audio, 240 frames GOP.
-func DefaultConfig(input string, hlsIngestURL string) Config {
+func DefaultConfig(input string, hlsIngestURL string, playlistPath string) Config {
 	return Config{
 		Input: input,
 
@@ -54,7 +56,15 @@ func DefaultConfig(input string, hlsIngestURL string) Config {
 		GOPCeiling: 240,
 
 		HlsIngestURL: hlsIngestURL,
+
+		PlaylistPath: playlistPath,
 	}
+}
+
+// GenerateTempPlaylistPath creates a unique temporary path for the HLS playlist.
+func (c *Config) GenerateTempPlaylistPath(seqBase uint32) string {
+	// Use a unique temp file per stream start
+	return filepath.Join(os.TempDir(), fmt.Sprintf("p2ptogether-master-%d-%d.m3u8", seqBase, time.Now().UnixNano()))
 }
 
 // BuildHLSStreamForHTTPOutput assembles an ffmpeg-go stream configured to output HLS segments
@@ -110,13 +120,7 @@ func BuildHLSStreamForHTTPOutput(cfg Config, seqBase uint32) *ffmpeg.Stream {
 		"b:a": cfg.AudioBitrate,
 	}
 
-	// The first argument to Output() is the playlist file.
-	// Since we generate the playlist ourselves and only care about ffmpeg PUTing segments,
-	// we can direct ffmpeg's playlist output to /dev/null (or NUL on Windows).
-	// ffmpeg-go might handle os.DevNull correctly.
-	// Using a unique temp file per stream start might be safer than a fixed /dev/null if ffmpeg has issues with it.
-	playlistOutputTarget := filepath.Join(os.TempDir(), fmt.Sprintf("p2ptogether-dummy-master-%d.m3u8", seqBase))
-	// playlistOutputTarget := os.DevNull
-
-	return inputStream.Output(playlistOutputTarget, outputArgs)
+	// The first argument to Output() is the playlist file path.
+	// This is the path the M3U8Monitor will watch.
+	return inputStream.Output(cfg.PlaylistPath, outputArgs)
 }

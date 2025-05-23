@@ -77,6 +77,26 @@ func (n *Node) EncoderLive() bool {
 	return n.encoderLive
 }
 
+// GetActualSegmentDuration makes Node implement media.DurationProvider
+func (n *Node) GetActualSegmentDuration(globalSeqNum uint32) (float64, bool) {
+	n.mu.RLock() // Protects n.encoderRunner
+	runner := n.encoderRunner
+	n.mu.RUnlock()
+
+	if runner == nil {
+		return 0, false
+	}
+	return runner.GetActualSegmentDuration(globalSeqNum)
+}
+
+// EncoderRunnerInstance returns the current encoder runner. Used by main to pass to ingest handler.
+// This is a bit of a violation of encapsulation, consider refactoring if node's runner changes.
+func (n *Node) EncoderRunnerInstance() *media.EncoderRunner {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.encoderRunner
+}
+
 // EnsureRunnerState manages the ffmpeg encoder runner based on the desired state.
 // If filePath is empty, it ensures the runner is stopped.
 // Otherwise, it ensures the runner is active for filePath with seqBase if this peer should be streaming.

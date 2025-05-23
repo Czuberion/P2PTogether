@@ -46,7 +46,12 @@ func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFun
 
 		// If we already have segments, list them; otherwise return just the header.
 		for _, s := range segs {
-			buf.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", SegmentDuration.Seconds()))
+			durationToUse := SegmentDuration.Seconds() // Fallback to nominal
+			if s.ActualDuration > 0 {
+				durationToUse = s.ActualDuration
+			}
+			// HLS spec recommends 6 decimal places for EXTINF
+			buf.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n", durationToUse))
 			buf.WriteString(fmt.Sprintf("seg_%d.ts\n", s.Seq))
 		}
 

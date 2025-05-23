@@ -13,10 +13,11 @@ const SegmentDuration = 2 * time.Second
 
 // A Segment is a complete 2‑second MPEG‑TS chunk.
 type Segment struct {
-	Seq  uint32    // monotonically increasing media‑sequence
-	Data []byte    // raw .ts payload
-	PTS  float64   // start PTS in seconds (for EXT‑X‑DISCONTINUITY later)
-	Time time.Time // arrival → garbage‑collection anchor
+	Seq            uint32    // monotonically increasing media‑sequence
+	Data           []byte    // raw .ts payload
+	PTS            float64   // start PTS in seconds (for EXT‑X‑DISCONTINUITY later)
+	Time           time.Time // arrival → garbage‑collection anchor
+	ActualDuration float64   // Precise duration of this segment in seconds
 }
 
 // SegmentEvent is used to notify about new segments.
@@ -92,14 +93,14 @@ func (rb *RingBuffer) idxFor(seq uint32) int {
 	return idx
 }
 
-func (rb *RingBuffer) Write(data []byte, pts float64) uint32 {
+func (rb *RingBuffer) Write(data []byte, pts float64, actualDuration float64) uint32 {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
 	seq := rb.nextSeq
 	rb.nextSeq++
 
-	rb.buf[rb.head] = Segment{Seq: seq, Data: data, PTS: pts, Time: rb.now()}
+	rb.buf[rb.head] = Segment{Seq: seq, Data: data, PTS: pts, Time: rb.now(), ActualDuration: actualDuration}
 	rb.head = (rb.head + 1) % rb.capacity
 
 	// Re‑compute the first live sequence: everything older than capacity is gone.
@@ -146,15 +147,16 @@ func (rb *RingBuffer) Get(seq uint32) []byte {
 // WriteAt writes a segment with an explicit sequence number. It
 // advances nextSeq if needed and evicts old entries exactly
 // like Write does.
-func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64) {
+func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64, actualDuration float64) {
 	rb.mu.Lock()
 
 	// place the segment at the current head
 	rb.buf[rb.head] = Segment{
-		Seq:  seq,
-		Data: data,
-		PTS:  pts,
-		Time: rb.now(),
+		Seq:            seq,
+		Data:           data,
+		PTS:            pts,
+		Time:           rb.now(),
+		ActualDuration: actualDuration,
 	}
 	rb.head = (rb.head + 1) % rb.capacity
 
@@ -199,4 +201,14 @@ func (rb *RingBuffer) Reset(newBase uint32) {
 	for i := range rb.buf {
 		rb.buf[i] = Segment{}
 	} // Zero out the Segment structs
+}
+
+// GetSegmentActualDuration returns the actual duration for a given sequence, or 0 if not found/set.
+func (rb *RingBuffer) GetSegmentActualDuration(seq uint32) float64 {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	if idx := rb.idxFor(seq); idx >= 0 {
+		return rb.buf[idx].ActualDuration
+	}
+	return 0 // Return 0 or a default nominal duration if not found
 }
