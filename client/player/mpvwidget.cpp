@@ -40,6 +40,7 @@ MpvWidget::MpvWidget(QWidget* parent, Qt::WindowFlags f) :
 
     mpv_set_option_string(mpv, "terminal", "yes");
     mpv_set_option_string(mpv, "msg-level", "all=v");
+    mpv_set_option_string(mpv, "quiet", "yes");
     mpv_set_option_string(mpv, "vo", "libmpv");
     mpv_set_option_string(mpv, "keepaspect", "yes");
     if (mpv_initialize(mpv) < 0)
