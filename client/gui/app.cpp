@@ -4,13 +4,17 @@
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
 #include "p2p/playback.pb.h"
+#include "p2p/session.pb.h"
 #include "player/mpv_manager.h"
 #include "transport/grpc_client.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDebug>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QMainWindow>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QPushButton>
 #include <QSplitter>
@@ -19,6 +23,47 @@
 #include <QWidget>
 #include <clocale>
 #include <stdexcept>
+
+// Helper function (could be moved to a utility or be a static member of a
+// dialog class)
+static void showSessionInfoDialog(const QString& title,
+                                  const QString& messageBody,
+                                  const QString& sessionId,
+                                  const QString& inviteCode, QWidget* parent) {
+    QDialog infoDialog(parent);
+    infoDialog.setWindowTitle(title);
+    QVBoxLayout* layout = new QVBoxLayout(&infoDialog);
+
+    layout->addWidget(new QLabel(messageBody, &infoDialog));
+    if (!sessionId.isEmpty()) {
+        layout->addWidget(
+            new QLabel(QString("Session ID: %1").arg(sessionId), &infoDialog));
+    }
+
+    if (!inviteCode.isEmpty()) {
+        QHBoxLayout* inviteLayout = new QHBoxLayout();
+        inviteLayout->addWidget(new QLabel(
+            QString("Invite Code: %1").arg(inviteCode), &infoDialog));
+        QPushButton* copyButton = new QPushButton("⧉");
+        copyButton->setToolTip("Copy Invite Code to Clipboard");
+        copyButton->setFixedSize(copyButton->fontMetrics().height() * 2,
+                                 copyButton->fontMetrics().height() * 2);
+        QObject::connect(copyButton, &QPushButton::clicked, [inviteCode]() {
+            QApplication::clipboard()->setText(inviteCode);
+        });
+        inviteLayout->addWidget(copyButton);
+        inviteLayout->addStretch();
+        layout->addLayout(inviteLayout);
+    }
+
+    QDialogButtonBox* buttonBox =
+        new QDialogButtonBox(QDialogButtonBox::Ok, &infoDialog);
+    QObject::connect(buttonBox, &QDialogButtonBox::accepted, &infoDialog,
+                     &QDialog::accept);
+    layout->addWidget(buttonBox);
+
+    infoDialog.exec();
+}
 
 namespace gui {
 
@@ -251,6 +296,48 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                "primarily handled by right_panel. Updating App's queue cache.";
         emit queueStateChanged(); // Emit signal as queue items list changed
         break;
+    case client::ServerMsg::kCreateSessionResponse: {
+        const auto& resp = msg.create_session_response();
+        if (resp.has_error_message()) {
+            QMessageBox::critical(m_mainWindow, "Session Creation Failed",
+                                  QString::fromStdString(resp.error_message()));
+            clearActiveSessionDetails();
+        } else {
+            qInfo() << "GUI: Session created successfully. ID:"
+                    << QString::fromStdString(resp.session_id())
+                    << "Invite Code:"
+                    << QString::fromStdString(resp.invite_code());
+            setActiveSessionDetails(QString::fromStdString(resp.session_id()),
+                                    QString::fromStdString(resp.invite_code()));
+            showSessionInfoDialog(
+                "Session Created", "Session successfully created!",
+                QString::fromStdString(resp.session_id()),
+                QString::fromStdString(resp.invite_code()), m_mainWindow);
+            // TODO: emit sessionStateChanged(true);
+        }
+    } break;
+    case client::ServerMsg::kJoinSessionResponse: {
+        const auto& resp = msg.join_session_response();
+        if (resp.has_error_message()) {
+            QMessageBox::critical(m_mainWindow, "Join Session Failed",
+                                  QString::fromStdString(resp.error_message()));
+            clearActiveSessionDetails();
+        } else {
+            qInfo() << "GUI: Session joined successfully. ID:"
+                    << QString::fromStdString(resp.session_id());
+            // For Option B (InviteCode == SessionID), we can use session_id as
+            // the invite code for display/copy
+            setActiveSessionDetails(QString::fromStdString(resp.session_id()),
+                                    QString::fromStdString(resp.session_id()));
+            showSessionInfoDialog(
+                "Session Joined", "Successfully joined session!",
+                QString::fromStdString(resp.session_id()),
+                QString::fromStdString(resp.session_id()),
+                m_mainWindow); // Show session_id as invite code
+            // TODO: Process resp.session_snapshot()
+            // TODO: emit sessionStateChanged(true);
+        }
+    } break;
     // TODO: Handle kStreamStatus, kChatMsg
     default:
         qInfo() << "App::onServerMessage: Unhandled message type:"
@@ -405,7 +492,7 @@ void App::setupUI() {
     mainSplitter->setSizes(sizes);
     mainSplitter->setCollapsible(0, false);
 
-    createMenus(m_mainWindow, &peer, m_roleStore, mainSplitter, rightPanel,
+    createMenus(m_mainWindow, this, m_roleStore, mainSplitter, rightPanel,
                 leftPanel, m_worker);
     m_mainWindow->show();
 }
@@ -485,6 +572,25 @@ int App::exec() {
 
 QList<client::p2p::QueueItem> App::getCurrentQueueItems() const {
     return m_currentQueueItems;
+}
+
+QString App::getCurrentSessionId() const {
+    return m_currentSessionId;
+}
+
+QString App::getCurrentInviteCode() const {
+    return m_currentInviteCode;
+}
+
+void App::setActiveSessionDetails(const QString& sessionId,
+                                  const QString& inviteCode) {
+    m_currentSessionId  = sessionId;
+    m_currentInviteCode = inviteCode;
+}
+
+void App::clearActiveSessionDetails() {
+    m_currentSessionId.clear();
+    m_currentInviteCode.clear();
 }
 
 int App::getCurrentPlayingIndex() const {

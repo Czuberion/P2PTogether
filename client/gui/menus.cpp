@@ -1,7 +1,13 @@
 #include "menus.h"
+#include "client.pb.h"
+#include "gui/app.h"
 #include "gui/right_panel.h"
+#include "p2p/session.pb.h"
 #include "roles/permissions.h"
+#include "transport/control_stream_worker.h"
 #include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDebug>
 #include <QDialog>
@@ -23,6 +29,46 @@
 namespace gui {
 
 std::function<void()> SidebarToggleCallback;
+
+// Helper function moved here or to a common utility. For now, static in this
+// TU.
+static void showSessionInfoDialogHelper(const QString& title,
+                                        const QString& messageBody,
+                                        const QString& sessionId,
+                                        const QString& inviteCode,
+                                        QWidget* parent) {
+    QDialog infoDialog(parent);
+    infoDialog.setWindowTitle(title);
+    QVBoxLayout* layout = new QVBoxLayout(&infoDialog);
+
+    layout->addWidget(new QLabel(messageBody, &infoDialog));
+    if (!sessionId.isEmpty()) {
+        layout->addWidget(
+            new QLabel(QString("Session ID: %1").arg(sessionId), &infoDialog));
+    }
+
+    if (!inviteCode.isEmpty()) {
+        QHBoxLayout* inviteLayout = new QHBoxLayout();
+        inviteLayout->addWidget(new QLabel(
+            QString("Invite Code: %1").arg(inviteCode), &infoDialog));
+        QPushButton* copyButton = new QPushButton("⧉");
+        copyButton->setToolTip("Copy Invite Code to Clipboard");
+        copyButton->setFixedSize(copyButton->fontMetrics().height() * 2,
+                                 copyButton->fontMetrics().height() * 2);
+        QObject::connect(copyButton, &QPushButton::clicked, [inviteCode]() {
+            QApplication::clipboard()->setText(inviteCode);
+        });
+        inviteLayout->addWidget(copyButton);
+        inviteLayout->addStretch();
+        layout->addLayout(inviteLayout);
+    }
+    QDialogButtonBox* buttonBox =
+        new QDialogButtonBox(QDialogButtonBox::Ok, &infoDialog);
+    QObject::connect(buttonBox, &QDialogButtonBox::accepted, &infoDialog,
+                     &QDialog::accept);
+    layout->addWidget(buttonBox);
+    infoDialog.exec();
+}
 
 // Helper function to rebuild the roles submenu
 // This needs access to rolesMenu, roleStore, worker, and myPeerIdStd
@@ -144,51 +190,227 @@ static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
     // permissions change
 }
 
-void createMenus(QMainWindow* window, P2P::Peer* peer,
+void createMenus(QMainWindow* window, gui::App* app,
                  P2P::Roles::RoleStore* roleStore, QSplitter* mainSplitter,
                  QWidget* rightPanel, QWidget* leftPanel,
                  P2P::ControlStreamWorker* worker) {
     QMenuBar* menuBar = window->menuBar();
 
     // Session menu
-    QMenu* sessionMenu  = menuBar->addMenu("Session");
-    QAction* joinAction = sessionMenu->addAction("Join Session");
-    QObject::connect(joinAction, &QAction::triggered, [window]() {
-        QDialog dialog(window);
-        dialog.setWindowTitle("Join Session");
-        QVBoxLayout* dialogLayout = new QVBoxLayout(&dialog);
-        dialogLayout->addWidget(
-            new QLabel("Enter a session ID to join:", &dialog));
-        QLineEdit* sessionInput = new QLineEdit(&dialog);
-        sessionInput->setPlaceholderText("Session ID");
-        dialogLayout->addWidget(sessionInput);
-        QDialogButtonBox* buttonBox = new QDialogButtonBox(
-            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-        dialogLayout->addWidget(buttonBox);
-        QObject::connect(buttonBox, &QDialogButtonBox::accepted, &dialog,
-                         &QDialog::accept);
-        QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog,
-                         &QDialog::reject);
-        if (dialog.exec() == QDialog::Accepted) {
-            QString sessionID = sessionInput->text();
-            if (!sessionID.isEmpty()) {
-                QMessageBox::information(
-                    window, "Session Joined",
-                    QString("You've joined session: %1").arg(sessionID));
-            }
-        }
-    });
+    QMenu* sessionMenu = menuBar->addMenu("Session");
 
+    // --- Create Session Action ---
+    QAction* createSessionAction = sessionMenu->addAction("Create Session...");
+    QObject::connect(
+        createSessionAction, &QAction::triggered, [window, worker, app]() {
+            if (!worker) {
+                QMessageBox::critical(window, "Error",
+                                      "Not connected to Peer Service.");
+                return;
+            }
+            if (app && !app->getCurrentSessionId().isEmpty()) {
+                QMessageBox::information(window, "Session Active",
+                                         "You are already in a session. Please "
+                                         "leave it to create a new one.");
+                return;
+            }
+
+            QDialog createDialog(window);
+            createDialog.setWindowTitle("Create New Session");
+            QFormLayout* form = new QFormLayout(&createDialog);
+
+            QLineEdit* sessionNameInput = new QLineEdit(&createDialog);
+            sessionNameInput->setPlaceholderText(
+                "(Optional) My Awesome Watch Party");
+            form->addRow("Session Name:", sessionNameInput);
+
+            QLineEdit* usernameInput = new QLineEdit(&createDialog);
+            // TODO: Pre-fill with a saved username preference if available
+            usernameInput->setPlaceholderText("Your Display Name");
+            form->addRow("Your Username:", usernameInput);
+
+            QDialogButtonBox* buttonBox = new QDialogButtonBox(
+                QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &createDialog);
+            form->addRow(buttonBox);
+
+            QObject::connect(buttonBox, &QDialogButtonBox::accepted,
+                             &createDialog, &QDialog::accept);
+            QObject::connect(buttonBox, &QDialogButtonBox::rejected,
+                             &createDialog, &QDialog::reject);
+
+            if (createDialog.exec() == QDialog::Accepted) {
+                client::ClientMsg clientMsg;
+                // Use the correct generated type:
+                // client::p2p::CreateSessionRequest
+                client::p2p::CreateSessionRequest* req =
+                    clientMsg.mutable_create_session_request();
+
+                QString sessionName = sessionNameInput->text();
+                QString username    = usernameInput->text();
+
+                if (!sessionName.isEmpty()) {
+                    req->set_session_name(sessionName.toStdString());
+                }
+                if (!username.isEmpty()) {
+                    req->set_username(username.toStdString());
+                }
+                qDebug() << "GUI: Sending CreateSessionRequest. Name:"
+                         << sessionName << "User:" << username;
+                worker->send(clientMsg);
+                // Response handled in App::onServerMessage
+            }
+        });
+
+    // --- Join Session Action ---
+    QAction* joinSessionAction = sessionMenu->addAction("Join Session...");
+    QObject::connect(
+        joinSessionAction, &QAction::triggered, [window, worker, app]() {
+            if (!worker) {
+                QMessageBox::critical(window, "Error",
+                                      "Not connected to Peer Service.");
+                return;
+            }
+            if (app && !app->getCurrentSessionId().isEmpty()) {
+                QMessageBox::information(window, "Session Active",
+                                         "You are already in a session. Please "
+                                         "leave it to join another.");
+                return;
+            }
+
+            QDialog joinDialog(window);
+            joinDialog.setWindowTitle("Join Existing Session");
+            QFormLayout* form = new QFormLayout(&joinDialog);
+
+            QLineEdit* inviteCodeInput = new QLineEdit(&joinDialog);
+            inviteCodeInput->setPlaceholderText(
+                "Enter Invite Code (Session ID)");
+            form->addRow("Invite Code:", inviteCodeInput);
+
+            QLineEdit* usernameInput = new QLineEdit(&joinDialog);
+            usernameInput->setPlaceholderText("Your Display Name");
+            form->addRow("Your Username:", usernameInput);
+
+            QDialogButtonBox* buttonBox = new QDialogButtonBox(
+                QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &joinDialog);
+            form->addRow(buttonBox);
+
+            QObject::connect(buttonBox, &QDialogButtonBox::accepted,
+                             &joinDialog, &QDialog::accept);
+            QObject::connect(buttonBox, &QDialogButtonBox::rejected,
+                             &joinDialog, &QDialog::reject);
+
+            if (joinDialog.exec() == QDialog::Accepted) {
+                QString inviteCode = inviteCodeInput->text().trimmed();
+                QString username   = usernameInput->text();
+
+                if (inviteCode.isEmpty()) {
+                    QMessageBox::warning(&joinDialog, "Input Error",
+                                         "Invite Code cannot be empty.");
+                    return;
+                }
+
+                client::ClientMsg clientMsg;
+                // Use the correct generated type:
+                // client::p2p::JoinSessionRequest
+                client::p2p::JoinSessionRequest* req =
+                    clientMsg.mutable_join_session_request();
+                req->set_invite_code(inviteCode.toStdString());
+                if (!username.isEmpty()) {
+                    req->set_username(username.toStdString());
+                }
+                qDebug() << "GUI: Sending JoinSessionRequest. Code:"
+                         << inviteCode << "User:" << username;
+                worker->send(clientMsg);
+                // Response handled in App::onServerMessage
+            }
+        });
+
+    // --- Copy Invite Code Action ---
+    QAction* copyInviteAction = sessionMenu->addAction("Copy Invite Code");
+    copyInviteAction->setEnabled(false); // Initially disabled
+    QObject::connect(
+        copyInviteAction, &QAction::triggered,
+        [app, window]() { // Added window for potential QMessageBox parent
+            if (!app)
+                return;
+            QString inviteCode =
+                app->getCurrentInviteCode(); // Assumes App stores this
+            if (!inviteCode.isEmpty()) {
+                QApplication::clipboard()->setText(inviteCode);
+                QMessageBox::information(window, "Invite Code Copied",
+                                         "Invite code copied to clipboard!");
+                qInfo() << "Invite code copied to clipboard:" << inviteCode;
+            } else {
+                QMessageBox::warning(
+                    window, "No Invite Code",
+                    "No active session or invite code available to copy.");
+                qWarning() << "Copy Invite Code: No active session or invite "
+                              "code available.";
+            }
+        });
+
+    // TODO: Add "Leave Session" action here. It should:
+    // - Notify the Peer Service (new ClientMsg type needed e.g.,
+    // LeaveSessionRequest)
+    // - Peer Service handles P2P cleanup for leaving.
+    // - App calls clearActiveSessionDetails() and updates UI.
     QAction* leaveAction = sessionMenu->addAction("Leave Session");
-    QObject::connect(leaveAction, &QAction::triggered, [window]() {
-        QMessageBox::information(window, "Leave", "Left current session");
-    });
+    leaveAction->setEnabled(false); // Enable when in a session
+    // QObject::connect(leaveAction, &QAction::triggered, ...);
+
     sessionMenu->addSeparator();
     QAction* quitAction = sessionMenu->addAction("Quit");
-    QObject::connect(quitAction, &QAction::triggered, [peer, window]() {
-        // peer->cleanup(); // cleanup is now part of QApplication::aboutToQuit
-        window->close();
-    });
+    QObject::connect(quitAction, &QAction::triggered, window,
+                     &QMainWindow::close);
+
+    // Function to update enabled state of session actions
+    auto updateSessionActions = [app, roleStore, createSessionAction,
+                                 joinSessionAction, copyInviteAction,
+                                 leaveAction]() {
+        if (!app)
+            return;
+        bool sessionActive = !app->getCurrentSessionId().isEmpty();
+        createSessionAction->setEnabled(!sessionActive);
+        joinSessionAction->setEnabled(!sessionActive);
+        leaveAction->setEnabled(sessionActive);
+
+        if (sessionActive && roleStore) {
+            quint32 perms =
+                roleStore->getPermissionsForPeer(roleStore->getLocalPeerId());
+            copyInviteAction->setEnabled(
+                P2P::Roles::hasPermission(perms, P2P::Roles::PermInvite));
+        } else {
+            copyInviteAction->setEnabled(false);
+        }
+    };
+
+    // Initial state update
+    updateSessionActions();
+
+    // Connect signals for dynamic updates
+    // This requires App to emit a signal when its session state changes,
+    // or we connect to individual RoleStore signals as before.
+    // For simplicity, let's assume App will have a sessionStateChanged signal
+    // eventually. For now, connect to RoleStore signals that imply a possible
+    // change in permissions or session context.
+    if (roleStore) {
+        QObject::connect(
+            roleStore, &P2P::Roles::RoleStore::peerRolesChanged, window,
+            [updateSessionActions, roleStore, app](const QString& peerId) {
+                if (app && roleStore && peerId == roleStore->getLocalPeerId())
+                    updateSessionActions();
+            });
+        QObject::connect(
+            roleStore, &P2P::Roles::RoleStore::localPeerIdConfirmed, window,
+            updateSessionActions); // When our ID is known, perms can be checked
+        QObject::connect(
+            roleStore, &P2P::Roles::RoleStore::allAssignmentsRefreshed, window,
+            updateSessionActions); // Full refresh might change our roles
+    }
+    // A more direct signal from App would be:
+    // QObject::connect(app, &gui::App::sessionStatusChanged, window,
+    // updateSessionActions); This signal would be emitted by App after
+    // setActiveSessionDetails or clearActiveSessionDetails.
 
     // Settings menu
     QMenu* settingsMenu  = menuBar->addMenu("Settings");

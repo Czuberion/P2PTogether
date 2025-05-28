@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ipfs/go-cid"
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -29,6 +30,7 @@ import (
 	"peer_service/internal/media"
 	"peer_service/internal/p2p"
 	"peer_service/internal/roles"
+	"peer_service/internal/session"
 	clientpb "peer_service/proto"  // local import for client proto
 	p2ppb "peer_service/proto/p2p" // local import for p2p proto
 )
@@ -47,6 +49,9 @@ type server struct {
 	// Peer runtime state
 	node *p2p.Node
 
+	// Session management
+	sessionManager *session.SessionManager
+
 	// Role Management
 	roleManager *roles.RoleManager
 
@@ -55,6 +60,9 @@ type server struct {
 
 	// GossipSub chat topic
 	chatTopic *pubsub.Topic
+
+	// DHT for peer discovery and content routing
+	dht *dht.IpfsDHT
 
 	triggerHLSDircontinuity func()
 }
@@ -160,6 +168,94 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		log.Printf("[gRPC Recv %s] %s, HLC: %d", nodeIDStr, cmdTypeString, hlc)
 
 		switch cmd := clientMsg.Payload.(type) {
+		case *clientpb.ClientMsg_CreateSessionRequest:
+			req := cmd.CreateSessionRequest
+			log.Printf("[gRPC Recv %s] CreateSessionRequest: Name='%s', User='%s'", nodeIDStr, req.GetSessionName(), req.GetUsername())
+
+			createdSession, err := s.sessionManager.CreateSession(senderID, req.GetUsername(), req.GetSessionName())
+			if err != nil {
+				log.Printf("Error creating session for %s: %v", nodeIDStr, err)
+				resp := &p2ppb.CreateSessionResponse{
+					ErrorMessage: proto.String(fmt.Sprintf("Failed to create session: %v", err)),
+				}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_CreateSessionResponse{CreateSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending CreateSession error response: %v", errSend)
+				}
+				continue // Next message from client
+			}
+
+			log.Printf("Session %s created by %s. Invite Code: %s", createdSession.ID, nodeIDStr, createdSession.InviteCode)
+
+			sessionIDCID, cidErr := common.StringToCID(createdSession.ID)
+			if cidErr != nil {
+				log.Printf("Error converting SessionID %s to CID: %v. DHT Provide skipped.", createdSession.ID, cidErr)
+			} else {
+				go func(ctx context.Context, c cid.Cid, sessID string) { // Pass context and sessionID for logging
+					log.Printf("Attempting DHT Provide for SessionID %s (CID: %s)", sessID, c.String())
+					provideCtx, provideCancel := context.WithTimeout(context.Background(), 60*time.Second) // Example timeout
+					defer provideCancel()
+					if errProvide := s.dht.Provide(provideCtx, c, true); errProvide != nil {
+						log.Printf("DHT Provide for SessionID %s (CID %s) failed: %v", sessID, c.String(), errProvide)
+					} else {
+						log.Printf("Successfully Provided SessionID %s (CID %s) on DHT", sessID, c.String())
+					}
+				}(stream.Context(), sessionIDCID, createdSession.ID) // Pass stream context for now
+			}
+
+			log.Printf("TODO: Persist session %s for Admin %s (SR-SM-2)", createdSession.ID, nodeIDStr)
+
+			resp := &p2ppb.CreateSessionResponse{SessionId: createdSession.ID, InviteCode: createdSession.InviteCode}
+			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_CreateSessionResponse{CreateSessionResponse: resp}}); errSend != nil {
+				log.Printf("Error sending CreateSessionResponse: %v", errSend)
+			}
+			continue // Successfully handled, move to next client message
+
+		case *clientpb.ClientMsg_JoinSessionRequest:
+			req := cmd.JoinSessionRequest
+			log.Printf("[gRPC Recv %s] JoinSessionRequest: InviteCode='%s', User='%s'", nodeIDStr, req.GetInviteCode(), req.GetUsername())
+
+			sessionIDToJoin := req.GetInviteCode()
+			joiningUsername := req.GetUsername()
+			_ = joiningUsername // Acknowledge use until implemented
+
+			sessionIDCID, cidErr := common.StringToCID(sessionIDToJoin)
+			if cidErr != nil {
+				log.Printf("Error converting InviteCode (SessionID) %s to CID: %v. Cannot FindProviders.", sessionIDToJoin, cidErr)
+				resp := &p2ppb.JoinSessionResponse{
+					ErrorMessage: proto.String(fmt.Sprintf("Invalid invite code format: %v", cidErr)),
+				}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (CID): %v", errSend)
+				}
+				continue
+			}
+
+			log.Printf("Attempting DHT FindProviders for SessionID CID: %s (from InviteCode %s)", sessionIDCID.String(), sessionIDToJoin)
+
+			findProvidersCtx, findProvidersCancel := context.WithTimeout(stream.Context(), 30*time.Second) // 30-second timeout for discovery
+			defer findProvidersCancel()
+
+			peerChan, err := s.dht.FindProviders(findProvidersCtx, sessionIDCID)
+			_ = peerChan // Acknowledge use until implemented
+			if err != nil {
+				log.Printf("DHT FindProviders for %s failed: %v", sessionIDCID.String(), err)
+				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Failed to find session provider (DHT error).")}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (DHT FindProviders): %v", errSend)
+				}
+				continue
+			}
+			log.Printf("DHT FindProviders for %s initiated. Waiting for Admin peer info...", sessionIDCID.String())
+			// TODO: Iterate peerChan, connect to Admin, perform /auth/1, then send actual JoinSessionResponse.
+			// For this increment, we're just testing discovery. We'll send a placeholder success/failure based on discovery.
+			// This part will be expanded significantly.
+
+			// Placeholder: If we reach here, assume discovery will proceed. Real response comes after /auth/1.
+			// For now, let's not send a response yet, as the flow is incomplete.
+			log.Printf("Placeholder: JoinSessionRequest for %s received and DHT FindProviders initiated. Full join flow pending.", sessionIDToJoin)
+
+			continue // Placeholder: move to next client message
+
 		case *clientpb.ClientMsg_QueueCmd:
 			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, senderID, s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", nodeIDStr, err)
@@ -753,11 +849,12 @@ func main() {
 	grpcServer := grpc.NewServer()
 
 	// 3) libp2p + GossipSub
-	lhost, _ := buildHost(ctx) // DHT not directly used by server instance for now
+	lhost, kadDHT := buildHost(ctx)
 	node := p2p.NewNode(lhost, hlsPort, rb)
 	hub := p2p.NewHub()
 	queueCtrl := p2p.NewQueueController(triggerDiscontinuity)
 	roleManager := roles.NewRoleManager()
+	sessionMgr := session.NewSessionManager(roleManager)
 
 	// Assign default roles (e.g., "Admin" or "Streamer,Viewer") to the service's own node ID
 	// This allows the service itself (when acting as sender) to have permissions.
@@ -816,6 +913,8 @@ func main() {
 		hub:                     hub,
 		queueCtrl:               queueCtrl,
 		node:                    node,
+		dht:                     kadDHT,
+		sessionManager:          sessionMgr,
 		roleManager:             roleManager,
 		ctrlTopic:               ctrlTopic,
 		chatTopic:               chatTopic,

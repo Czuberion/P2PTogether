@@ -8,6 +8,7 @@ import "p2p/streaming.proto";
 import "p2p/playback.proto";
 import "p2p/chat.proto";
 import "p2p/analytics.proto";
+import "p2p/session.proto";
 
 option go_package = "peer_service/proto;client";
 
@@ -18,9 +19,9 @@ message ServiceInfo {
   uint32 hls_port = 1;
 }
 
-// Sent by the service to the client upon successful ControlStream connection,
-// identifying the client's effective peer ID as recognized by this service
-// instance.
+// Sent by the service to the client upon successful ControlStream connection or
+// as part of initial state, identifying the client's effective peer ID as
+// recognized by this service instance for the current session.
 message LocalPeerIdentity {
   string peer_id = 1; // The libp2p Peer ID string of this service node.
 }
@@ -37,6 +38,8 @@ message ClientMsg {
     client.p2p.UpdateRoleCmd update_role_cmd = 5;
     client.p2p.RemoveRoleCmd remove_role_cmd = 6;
     client.p2p.PlaybackStreamCompleted playback_stream_completed_cmd = 7;
+    client.p2p.CreateSessionRequest create_session_request = 8;
+    client.p2p.JoinSessionRequest join_session_request = 9;
   }
 }
 
@@ -53,6 +56,8 @@ message ServerMsg {
     LocalPeerIdentity local_peer_identity = 8;
     client.p2p.SetPlaybackStateCmd playback_state_cmd = 9;
     client.p2p.PlaylistReset playlist_reset = 10;
+    client.p2p.CreateSessionResponse create_session_response = 11;
+    client.p2p.JoinSessionResponse join_session_response = 12;
   }
 }
 

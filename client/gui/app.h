@@ -47,6 +47,12 @@ public:
     QList<client::p2p::QueueItem> getCurrentQueueItems() const;
     int getCurrentPlayingIndex() const;
     uint32_t getCurrentStreamSequenceId() const;
+    // Session state management
+    QString getCurrentSessionId() const;
+    QString getCurrentInviteCode() const;
+    void setActiveSessionDetails(const QString& sessionId,
+                                 const QString& inviteCode);
+    void clearActiveSessionDetails();
 
 private slots:
     // Slot to confirm netThread has started
@@ -80,6 +86,10 @@ private:
     bool m_playbackCompletedCurrentStream =
         false; // Prevent multiple EOF reports
 
+    // Active session details
+    QString m_currentSessionId;
+    QString m_currentInviteCode;
+
     void setupP2P();
     void setupUI();
     void cleanup();
@@ -87,6 +97,8 @@ private:
 signals:
     // Emitted when queue items or playing index changes
     void queueStateChanged();
+    // void sessionStateChanged(bool isActive); // Optional: for more granular
+    // UI updates
 };
 
 } // namespace gui

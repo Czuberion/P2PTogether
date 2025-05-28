@@ -1,0 +1,38 @@
+syntax = "proto3";
+package client.p2p;
+
+option go_package = "peer_service/proto/p2p";
+
+message CreateSessionRequest {
+  optional string session_name = 1;
+  // User-chosen display name for the Admin creating the session
+  optional string username = 2;
+}
+
+message CreateSessionResponse {
+  // The unique ID for the created session.
+  string session_id = 1;
+  // The code to share for others to join (this is the session_id).
+  string invite_code = 2;
+  // If creation failed.
+  optional string error_message = 3;
+}
+
+message JoinSessionRequest {
+  // The invite code (which is the SessionID).
+  string invite_code = 1;
+  // User-chosen display name for the joining peer.
+  optional string username = 2;
+}
+
+message JoinSessionResponse {
+  // The ID of the session joined.
+  string session_id = 1;
+  // Initial roles assigned (e.g., "Viewer").
+  repeated string assigned_roles = 2;
+  // Serialized initial state (e.g., current roles, queue). Can be empty
+  // initially.
+  bytes session_snapshot = 3;
+  // If join failed.
+  optional string error_message = 4;
+}

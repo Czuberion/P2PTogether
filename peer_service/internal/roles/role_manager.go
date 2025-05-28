@@ -25,7 +25,8 @@ var defaultRoleDefinitions = []*Role{
 			PermBanUser |
 			PermModerateChat |
 			PermAddRemoveRoles |
-			PermManageUserRoles,
+			PermManageUserRoles |
+			PermInvite,
 	},
 	{
 		Name: "Streamer",

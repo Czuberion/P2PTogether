@@ -16,6 +16,7 @@ const (
 	PermModerateChat    // Permits moderating the chat, including deleting messages and muting users
 	PermAddRemoveRoles  // Permits adding or removing roles session-wide
 	PermManageUserRoles // Permits managing roles of users, including granting or revoking roles
+	PermInvite          // Permits viewing/copying the session invite code
 
 	// Streaming permissions
 
