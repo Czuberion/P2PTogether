@@ -235,8 +235,7 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			findProvidersCtx, findProvidersCancel := context.WithTimeout(stream.Context(), 30*time.Second) // 30-second timeout for discovery
 			defer findProvidersCancel()
 
-			peerChan, err := s.dht.FindProviders(findProvidersCtx, sessionIDCID)
-			_ = peerChan // Acknowledge use until implemented
+			providers, err := s.dht.FindProviders(findProvidersCtx, sessionIDCID)
 			if err != nil {
 				log.Printf("DHT FindProviders for %s failed: %v", sessionIDCID.String(), err)
 				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Failed to find session provider (DHT error).")}
@@ -250,11 +249,80 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			// For this increment, we're just testing discovery. We'll send a placeholder success/failure based on discovery.
 			// This part will be expanded significantly.
 
-			// Placeholder: If we reach here, assume discovery will proceed. Real response comes after /auth/1.
-			// For now, let's not send a response yet, as the flow is incomplete.
-			log.Printf("Placeholder: JoinSessionRequest for %s received and DHT FindProviders initiated. Full join flow pending.", sessionIDToJoin)
+			var adminInfo *peer.AddrInfo
+			var foundAdmin bool
 
-			continue // Placeholder: move to next client message
+			// Iterate over the providers found.
+			// For WAN demo, we assume the first valid provider is the Admin.
+			// More robust logic might be needed for multiple providers.
+			for _, pInfo := range providers {
+				if pInfo.ID == s.node.ID() {
+					log.Printf("Found self (%s) as provider for session %s. Skipping.", s.node.ID(), sessionIDToJoin)
+					continue
+				}
+				log.Printf("Found potential admin provider for session %s: %s with addrs %v", sessionIDToJoin, pInfo.ID, pInfo.Addrs)
+				adminInfo = &pInfo // pInfo is already peer.AddrInfo, so assign its address
+				foundAdmin = true
+				break // Use the first one found
+			}
+
+			if !foundAdmin {
+				errMsg := fmt.Sprintf("No providers found for session %s on the DHT.", sessionIDToJoin)
+				log.Println(errMsg)
+				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (no providers): %v", errSend)
+				}
+				continue
+			}
+
+			log.Printf("Attempting to connect to Admin %s for session %s", adminInfo.ID, sessionIDToJoin)
+			connectCtx, connectCancel := context.WithTimeout(stream.Context(), 15*time.Second) // Timeout for connection attempt
+			defer connectCancel()
+
+			if err := s.node.Connect(connectCtx, *adminInfo); err != nil {
+				errMsg := fmt.Sprintf("Failed to connect to session Admin %s: %v", adminInfo.ID, err)
+				log.Println(errMsg)
+				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (connection failed): %v", errSend)
+				}
+				continue
+			}
+
+			log.Printf("Successfully connected to Admin %s for session %s. Proceeding to /auth/1 protocol.", adminInfo.ID, sessionIDToJoin)
+
+			// --- Phase 2: Task 4 (Initiate /auth/1) ---
+			authStreamCtx, authStreamCancel := context.WithTimeout(stream.Context(), 30*time.Second) // Timeout for auth exchange
+			defer authStreamCancel()
+
+			authStream, err := s.node.NewStream(authStreamCtx, adminInfo.ID, "/p2ptogether/auth/1")
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to open /auth/1 stream to Admin %s: %v", adminInfo.ID, err)
+				log.Println(errMsg)
+				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (auth stream open failed): %v", errSend)
+				}
+				continue
+			}
+			log.Printf("Opened /auth/1 stream to Admin %s", adminInfo.ID)
+
+			// Next steps (sending AuthRequest, reading JoinSessionResponse from Admin) will be in the next increment.
+			// For now, placeholder:
+			authStream.Close() // Close the stream for now.
+			log.Printf("Placeholder: /auth/1 stream opened and closed. Full auth logic pending.")
+
+			// TEMPORARY: Send a placeholder "discovery/connection successful, auth pending" to GUI.
+			// This will be replaced by the actual response from Admin via /auth/1.
+			tempResp := &p2ppb.JoinSessionResponse{
+				SessionId: sessionIDToJoin, // Echo back the session ID
+				// ErrorMessage: proto.String("Connected to Admin, authentication pending..."), // Or just success for now
+			}
+			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: tempResp}}); errSend != nil {
+				log.Printf("Error sending temporary JoinSession success response: %v", errSend)
+			}
+			continue
 
 		case *clientpb.ClientMsg_QueueCmd:
 			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, senderID, s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
