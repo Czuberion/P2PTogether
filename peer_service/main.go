@@ -341,11 +341,50 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			log.Printf("Sent AuthRequest to Admin %s for session %s. Username: %s", adminInfo.ID, sessionIDToJoin, joiningUsername)
 
 			// --- Read JoinSessionResponse from Admin ---
-			// This will be implemented more fully in the next increment.
-			// For now, the GUI will wait. Actual response processing is pending.
-			log.Printf("Waiting for JoinSessionResponse from Admin %s on /auth/1 stream...", adminInfo.ID)
-			// The JoinSessionResponse to the GUI will be sent after the Admin's response is processed.
-			// Placeholder tempResp removed.
+			authRespBuf := make([]byte, 4096) // Adjust buffer size if snapshot is larger
+			authRespN, err := authStream.Read(authRespBuf)
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to read JoinSessionResponse from Admin %s: %v", adminInfo.ID, err)
+				log.Println(errMsg)
+				// Send error to GUI
+				guiResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: guiResp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (auth read failed): %v", errSend)
+				}
+				authStream.Reset()
+				continue
+			}
+
+			var adminJoinResp p2ppb.JoinSessionResponse // Variable to store Admin's response
+			if err := proto.Unmarshal(authRespBuf[:authRespN], &adminJoinResp); err != nil {
+				errMsg := fmt.Sprintf("Failed to unmarshal JoinSessionResponse from Admin %s: %v", adminInfo.ID, err)
+				log.Println(errMsg)
+				guiResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: guiResp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (auth unmarshal failed): %v", errSend)
+				}
+				authStream.Reset()
+				continue
+			}
+			authStream.Close() // We've received the response.
+
+			log.Printf("Received JoinSessionResponse from Admin %s. SessionID: %s, Error: %s", adminInfo.ID, adminJoinResp.GetSessionId(), adminJoinResp.GetErrorMessage())
+
+			if adminJoinResp.GetErrorMessage() != "" {
+				// Admin denied join or encountered an error, forward to GUI
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: &adminJoinResp}}); errSend != nil {
+					log.Printf("Error sending Admin's error JoinSessionResponse to GUI: %v", errSend)
+				}
+				continue
+			}
+
+			// --- Process successful JoinSessionResponse from Admin ---
+			s.processAdminJoinResponse(&adminJoinResp) // Call new helper function
+
+			// Send the Admin's response (which includes the snapshot) to the local GUI.
+			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: &adminJoinResp}}); errSend != nil {
+				log.Printf("Error sending final JoinSessionResponse to GUI: %v", errSend)
+			}
 			continue
 
 		case *clientpb.ClientMsg_QueueCmd:
@@ -430,6 +469,43 @@ func (s *server) publishToChatTopic(ctx context.Context, msg *clientpb.ServerMsg
 		return fmt.Errorf("failed to publish ServerMsg (ChatMsg) to chatTopic: %w", err)
 	}
 	return nil
+}
+
+// processAdminJoinResponse handles the successful JoinSessionResponse received from the Admin.
+// This is called by the Joiner's Peer Service.
+func (s *server) processAdminJoinResponse(adminResp *p2ppb.JoinSessionResponse) {
+	log.Printf("Joiner: Processing successful JoinSessionResponse from Admin. SessionID: %s. Roles: %v. Snapshot size: %d bytes",
+		adminResp.GetSessionId(), adminResp.GetAssignedRoles(), len(adminResp.GetSessionSnapshot()))
+
+	// Store current session ID in the node
+	s.node.SetCurrentSessionID(adminResp.GetSessionId())
+
+	// Apply snapshot if present
+	if len(adminResp.GetSessionSnapshot()) > 0 {
+		var sessionStateData p2ppb.SessionStateData
+		if err := proto.Unmarshal(adminResp.GetSessionSnapshot(), &sessionStateData); err != nil {
+			log.Printf("Joiner: Failed to unmarshal SessionStateData from snapshot: %v. Proceeding without applying snapshot.", err)
+		} else {
+			log.Printf("Joiner: Successfully unmarshalled SessionStateData. Applying state...")
+			if snapRoles := sessionStateData.GetAllRoleAssignments(); snapRoles != nil { // Use renamed field
+				if err := s.roleManager.ApplyAllAssignmentsSnapshot(snapRoles); err != nil {
+					log.Printf("Joiner: Error applying role assignments snapshot: %v", err)
+				} else {
+					log.Printf("Joiner: Applied role assignments snapshot. Local roles may have changed.")
+				}
+			}
+			if snapQueue := sessionStateData.GetCurrentQueueState(); snapQueue != nil {
+				s.queueCtrl.ApplyUpdate(snapQueue, s.hub, s.node, s.roleManager)
+				log.Printf("Joiner: Applied queue state snapshot.")
+			}
+			// TODO: Apply playback state if present (sessionStateData.GetCurrentPlaybackState())
+		}
+	}
+
+	// Subscribe to session-specific topics
+	if err := s.node.JoinSessionTopics(adminResp.GetSessionId()); err != nil {
+		log.Printf("Joiner: Failed to join session-specific pubsub topics for session %s: %v", adminResp.GetSessionId(), err)
+	}
 }
 
 // handleAuthStream is called by the Admin peer when a Joiner opens a /p2ptogether/auth/1 stream.
@@ -1075,7 +1151,11 @@ func main() {
 
 	// 3) libp2p + GossipSub
 	lhost, kadDHT := buildHost(ctx)
-	node := p2p.NewNode(lhost, hlsPort, rb)
+	ps, err := pubsub.NewGossipSub(ctx, lhost)
+	if err != nil {
+		log.Fatalf("GossipSub init failed: %v", err)
+	}
+	node := p2p.NewNode(lhost, ps, hlsPort, rb)
 	hub := p2p.NewHub()
 	queueCtrl := p2p.NewQueueController(triggerDiscontinuity)
 	roleManager := roles.NewRoleManager()
@@ -1104,11 +1184,6 @@ func main() {
 	}
 	node.SetDependencies(queueCtrl, roleManager, hub) // Inject dependencies into Node
 
-	ps, err := pubsub.NewGossipSub(ctx, lhost)
-	if err != nil {
-		log.Fatalf("GossipSub init failed: %v", err)
-	}
-
 	videoTopic, err := ps.Join("/p2ptogether/video/1")
 	if err != nil {
 		log.Fatalf("join video topic: %v", err)
@@ -1117,9 +1192,11 @@ func main() {
 	chatTopic, _ := ps.Join("/p2ptogether/chat/default")
 	ctrlTopic, _ := ps.Join("/p2ptogether/control/default")
 
-	queueCtrl.SetDependencies(node, hub, roleManager, ctrlTopic)
+	// Pass the node's getter for ctrlTopic, so QueueController always uses the current one
+	queueCtrl.SetDependencies(node, hub, roleManager, node.CtrlTopic())
 
-	node.AttachPubSub(videoTopic, chatTopic, ctrlTopic)
+	node.AttachGlobalTopics(videoTopic)
+	// Session-specific topics (chat, control) are joined by node.JoinSessionTopics()
 
 	// Subscribe to the control topic for various ServerMsg types
 	subCtrl, err := ctrlTopic.Subscribe()

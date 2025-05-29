@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 
@@ -28,9 +29,10 @@ type Node struct {
 	// ------------------- mutable, app‑specific -------------------
 	mu sync.RWMutex
 
-	hlsPort     uint32            // 127.0.0.1:<port> for local mini‑HLS
-	ringBuffer  *media.RingBuffer // Reference to the global RingBuffer
-	encoderLive bool              // ffmpeg running right now on *this* peer?
+	currentSessionID string            // ID of the session this node is currently part of
+	hlsPort          uint32            // 127.0.0.1:<port> for local mini‑HLS
+	ringBuffer       *media.RingBuffer // Reference to the global RingBuffer
+	encoderLive      bool              // ffmpeg running right now on *this* peer?
 
 	// Continuity counter used when *this* peer becomes Streamer.
 	// Should be managed by QueueController or passed in. For now, keep track locally.
@@ -42,9 +44,10 @@ type Node struct {
 	runnerCancel  context.CancelFunc // Used to stop the current runner
 
 	// Gossipsub handles (lazy‑initialised)
-	videoTopic *pubsub.Topic // /p2ptogether/video/1   (push 2‑s .ts)
-	chatTopic  *pubsub.Topic // /p2ptogether/chat/<SID>
-	ctrlTopic  *pubsub.Topic // /p2ptogether/control/<SID>
+	ps         *pubsub.PubSub // Main PubSub instance
+	videoTopic *pubsub.Topic  // /p2ptogether/video/1   (push 2‑s .ts)
+	chatTopic  *pubsub.Topic  // /p2ptogether/chat/<SID>
+	ctrlTopic  *pubsub.Topic  // /p2ptogether/control/<SID>
 
 	// --- lightweight analytics counters ---
 	bytesUp   uint64
@@ -61,11 +64,12 @@ type Node struct {
 
 // -------------- constructors --------------
 
-func NewNode(h host.Host, hlsPort uint32, rb *media.RingBuffer) *Node {
+func NewNode(h host.Host, psInstance *pubsub.PubSub, hlsPort uint32, rb *media.RingBuffer) *Node {
 	return &Node{
 		Host:       h,
 		hlsPort:    hlsPort,
 		ringBuffer: rb,
+		ps:         psInstance,
 	}
 }
 
@@ -410,12 +414,70 @@ func (n *Node) SetDependencies(qc *QueueController, rm *roles.RoleManager, hub *
 
 // -------------- networking helpers --------------
 
-// AttachPubSub stores the topics so that other packages (queue, chat, …)
-// don’t have to pass them around explicitly.
-func (n *Node) AttachPubSub(video, chat, ctrl *pubsub.Topic) {
+// SetCurrentSessionID stores the current session ID for the node.
+func (n *Node) SetCurrentSessionID(sessionID string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.videoTopic, n.chatTopic, n.ctrlTopic = video, chat, ctrl
+	n.currentSessionID = sessionID
+}
+
+// GetCurrentSessionID retrieves the current session ID.
+func (n *Node) GetCurrentSessionID() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.currentSessionID
+}
+
+// PubSubInstance returns the node's PubSub service instance.
+func (n *Node) PubSubInstance() *pubsub.PubSub {
+	// n.ps is set at construction and doesn't change, so RLock might be overkill
+	// but good for consistency if other parts of Node struct were to influence it.
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.ps
+}
+
+// JoinSessionTopics subscribes to session-specific pubsub topics.
+// It leaves previous session topics if any.
+func (n *Node) JoinSessionTopics(sessionID string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.ps == nil {
+		return fmt.Errorf("pubsub service not initialized in node")
+	}
+
+	// Leave previous session topics if they exist
+	if n.chatTopic != nil {
+		n.chatTopic.Close() // Best effort, errors not critical here
+		log.Printf("Node %s: Left previous chat topic %s", n.ID(), n.chatTopic.String())
+	}
+	if n.ctrlTopic != nil {
+		n.ctrlTopic.Close()
+		log.Printf("Node %s: Left previous control topic %s", n.ID(), n.ctrlTopic.String())
+	}
+
+	var err error
+	n.chatTopic, err = n.ps.Join(fmt.Sprintf("/p2ptogether/chat/%s", sessionID))
+	if err != nil {
+		return fmt.Errorf("failed to join chat topic for session %s: %w", sessionID, err)
+	}
+	n.ctrlTopic, err = n.ps.Join(fmt.Sprintf("/p2ptogether/control/%s", sessionID))
+	if err != nil {
+		n.chatTopic.Close() // Rollback chat topic join on control topic failure
+		return fmt.Errorf("failed to join control topic for session %s: %w", sessionID, err)
+	}
+	n.currentSessionID = sessionID // Update current session ID
+	log.Printf("Node %s: Successfully joined chat (%s) and control (%s) topics for session %s", n.ID(), n.chatTopic.String(), n.ctrlTopic.String(), sessionID)
+	return nil
+}
+
+// AttachGlobalTopics stores the global topics (like video).
+// don’t have to pass them around explicitly.
+func (n *Node) AttachGlobalTopics(video *pubsub.Topic) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.videoTopic = video
 }
 
 func (n *Node) VideoTopic() *pubsub.Topic { n.mu.RLock(); defer n.mu.RUnlock(); return n.videoTopic }
