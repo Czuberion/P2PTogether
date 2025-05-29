@@ -485,15 +485,84 @@ func (s *server) handleAuthStream(stream network.Stream) {
 		return
 	}
 
-	// For this increment, send a simple success response.
-	// Snapshot population will be in the next increment.
-	successResp := &p2ppb.JoinSessionResponse{SessionId: session.ID, AssignedRoles: []string{"Viewer"}}
+	// --- Populate SessionStateData for the snapshot ---
+	allAssignments := s.roleManager.GetAllAssignments() // This returns []*p2ppb.PeerRoleAssignment
+	allAssignmentsPb := &p2ppb.AllPeerRoleAssignments{
+		Assignments: allAssignments, // Directly use the slice
+		HlcTs:       common.GetCurrentHLC(),
+	}
+
+	queueItems := s.queueCtrl.Q().Items() // This returns []p2p.QueueItem (internal type)
+	pbQueueItems := make([]*p2ppb.QueueItem, 0, len(queueItems))
+	for _, qi := range queueItems {
+		pbQueueItems = append(pbQueueItems, &p2ppb.QueueItem{
+			FilePath: qi.FilePath,
+			StoredBy: qi.StoredBy.String(),
+			AddedBy:  qi.AddedBy.String(),
+			FirstSeq: qi.FirstSeq,
+			NumSegs:  qi.NumSegs,
+			HlcTs:    qi.HlcTs,
+		})
+	}
+	queueUpdatePb := &p2ppb.QueueUpdate{Items: pbQueueItems, HlcTs: common.GetCurrentHLC()}
+
+	// TODO: Populate current_playback_state if/when GetLastKnownPlaybackState is robust
+	// playbackStateInfo := s.queueCtrl.GetLastKnownPlaybackState()
+	// var currentPlaybackCmd *p2ppb.SetPlaybackStateCmd
+	// if playbackStateInfo.HlcTs > 0 { // Example condition: only send if state is somewhat initialized
+	// 	currentPlaybackCmd = &p2ppb.SetPlaybackStateCmd{
+	// 		TargetTimePos:    0, // This needs to be converted from PlaybackStateInfo
+	// 		TargetIsPlaying:  playbackStateInfo.IsPlaying,
+	// 		TargetSpeed:      1.0, // This needs to be converted
+	// 		HlcTs:            playbackStateInfo.HlcTs,
+	// 		StreamSequenceId: playbackStateInfo.StreamSequenceID,
+	// 	}
+	// }
+
+	sessionStateData := &p2ppb.SessionStateData{
+		AllRoleAssignments: allAssignmentsPb,
+		CurrentQueueState:  queueUpdatePb,
+		// CurrentPlaybackState: currentPlaybackCmd, // Add when ready
+	}
+	snapshotBytes, errMarshal := proto.Marshal(sessionStateData)
+	if errMarshal != nil {
+		log.Printf("Admin: Failed to marshal SessionStateData for peer %s: %v", remotePeerID, errMarshal)
+		// Send error or simple success without snapshot
+		errResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Internal server error creating session snapshot.")}
+		errRespBytes, _ := proto.Marshal(errResp)
+		_, _ = stream.Write(errRespBytes)
+		return
+	}
+
+	successResp := &p2ppb.JoinSessionResponse{SessionId: session.ID, AssignedRoles: []string{"Viewer"}, SessionSnapshot: snapshotBytes}
 	successRespBytes, _ := proto.Marshal(successResp)
 	if _, err := stream.Write(successRespBytes); err != nil {
 		log.Printf("Admin: Error writing success JoinSessionResponse to %s: %v", remotePeerID, err)
 	}
-	log.Printf("Admin: Peer %s successfully authenticated and added to session %s as Viewer.", remotePeerID, session.ID)
-	// TODO: Broadcast PeerRoleAssignment
+	log.Printf("Admin: Peer %s successfully authenticated and added to session %s as Viewer. Snapshot sent (%d bytes).", remotePeerID, session.ID, len(snapshotBytes))
+
+	// Broadcast PeerRoleAssignment for the new joiner
+	newMemberAssignment := &p2ppb.PeerRoleAssignment{
+		PeerId:            remotePeerID.String(),
+		AssignedRoleNames: []string{"Viewer"}, // Roles assigned during AddPeerToSession
+		HlcTs:             common.GetCurrentHLC(),
+	}
+	serverMsgPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: newMemberAssignment}}
+
+	// Broadcast to Admin's own GUI
+	s.hub.Broadcast(serverMsgPayload)
+
+	// Broadcast to other peers in the session via GossipSub control topic
+	// TODO: Ensure s.ctrlTopic is correctly initialized and session-specific if needed
+	if s.ctrlTopic != nil { // s.ctrlTopic is currently global, needs to be session-specific
+		if err := s.publishToControlTopic(context.Background(), serverMsgPayload); err != nil { // Using Background context for now
+			log.Printf("Admin: Error publishing PeerRoleAssignment for %s to control topic: %v", remotePeerID, err)
+		} else {
+			log.Printf("Admin: Published PeerRoleAssignment for new joiner %s to control topic.", remotePeerID)
+		}
+	} else {
+		log.Printf("Admin: Control topic is nil, cannot publish PeerRoleAssignment for %s.", remotePeerID)
+	}
 }
 
 // Handle incoming SetPeerRolesCmd
