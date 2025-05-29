@@ -34,10 +34,6 @@ type Node struct {
 	ringBuffer       *media.RingBuffer // Reference to the global RingBuffer
 	encoderLive      bool              // ffmpeg running right now on *this* peer?
 
-	// Continuity counter used when *this* peer becomes Streamer.
-	// Should be managed by QueueController or passed in. For now, keep track locally.
-	// nextMediaSeqForEncoder uint32
-
 	// Runner management
 	encoderRunner *media.EncoderRunner
 	runnerCtx     context.Context    // Context for the current runner instance
@@ -59,7 +55,6 @@ type Node struct {
 	queueControllerRef *QueueController
 	roleManagerRef     *roles.RoleManager
 	hubRef             *Hub
-	// triggerDiscontinuityRef func() // This will be passed to QueueController.Handle
 }
 
 // -------------- constructors --------------
@@ -112,7 +107,7 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 	if n.encoderRunner == nil {
 		log.Println("Node.EnsureRunnerState: Initializing EncoderRunner.")
 		n.encoderRunner = media.NewEncoderRunner(n.hlsPort)
-		log.Printf("Node.EnsureRunnerState: n.encoderRunner after init: %p", n.encoderRunner)
+		// log.Printf("Node.EnsureRunnerState: n.encoderRunner after init: %p", n.encoderRunner)
 	}
 
 	// Critical: Capture these dependencies while Node.mu is locked.
@@ -210,12 +205,6 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 			// The old goroutine should detect cancellation and exit.
 		}
 
-		// // Trigger discontinuity for the new stream on this node's HLS server.
-		// // This is important if this node itself is also a viewer of its own stream.
-		// if n.queueControllerRef != nil && n.queueControllerRef.triggerDiscontinuity != nil {
-		// 	log.Printf("Node.EnsureRunnerState: Triggering local HLS discontinuity for new stream %s (seq %d)", filePath, seqBase)
-		// 	n.queueControllerRef.triggerDiscontinuity()
-		// }
 		log.Printf("Node.EnsureRunnerState: [%s] Existing runner (if any) cancellation requested.", n.ID())
 
 		// Reset this node's RingBuffer with the new firstSeq.
@@ -269,8 +258,6 @@ func (n *Node) EnsureRunnerState(filePath string, seqBase uint32) {
 		localRunner := n.encoderRunner
 		localNodeID := n.ID()
 		localQC := qc
-		// localRM := rm
-		// localHub := n.hubRef
 
 		n.mu.Unlock() // Unlock Node.mu before starting the goroutine
 
@@ -354,13 +341,10 @@ func (n *Node) StopCurrentEncoder() {
 func (n *Node) ReactToQueueUpdate() {
 	log.Printf("Node.ReactToQueueUpdate: Checking runner state for peer %s", n.ID())
 
-	log.Printf("Node.ReactToQueueUpdate: [%s] Attempting to RLock n.mu", n.ID())
 	n.mu.RLock()
-	log.Printf("Node.ReactToQueueUpdate: [%s] Successfully RLock'ed n.mu", n.ID())
 	qc := n.queueControllerRef
 	rm := n.roleManagerRef
 	n.mu.RUnlock()
-	log.Printf("Node.ReactToQueueUpdate: [%s] Released RLock n.mu", n.ID())
 
 	if n.ringBuffer == nil {
 		log.Printf("Node.ReactToQueueUpdate: [%s] RingBuffer reference is nil. Cannot determine next sequence. Aborting.", n.ID())
@@ -372,9 +356,9 @@ func (n *Node) ReactToQueueUpdate() {
 		return
 	}
 
-	log.Printf("Node.ReactToQueueUpdate: [%s] Attempting to get queue head", n.ID())
+	// log.Printf("Node.ReactToQueueUpdate: [%s] Attempting to get queue head", n.ID())
 	head, ok := qc.Q().Head()
-	log.Printf("Node.ReactToQueueUpdate: [%s] Got queue head (ok: %v)", n.ID(), ok)
+	// log.Printf("Node.ReactToQueueUpdate: [%s] Got queue head (ok: %v)", n.ID(), ok)
 	if !ok {
 		log.Printf("Node.ReactToQueueUpdate: [%s] Queue is empty. Ensuring runner is stopped.", n.ID())
 		n.EnsureRunnerState("", 0) // Empty filePath signals stop
