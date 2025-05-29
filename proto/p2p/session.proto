@@ -3,6 +3,10 @@ package client.p2p;
 
 option go_package = "peer_service/proto/p2p";
 
+import "p2p/role.proto";
+import "p2p/queue.proto";
+import "p2p/playback.proto";
+
 message CreateSessionRequest {
   optional string session_name = 1;
   // User-chosen display name for the Admin creating the session
@@ -35,4 +39,28 @@ message JoinSessionResponse {
   bytes session_snapshot = 3;
   // If join failed.
   optional string error_message = 4;
+}
+
+// AuthRequest is sent by the Joiner to the Admin over the /auth/1 stream.
+message AuthRequest {
+  string session_id = 1; // SessionID the joiner wants to join
+  string username = 2;   // Joiner's desired username
+  // bytes client_pub_key = 3; // Joiner's public key for identity (optional,
+  // can get from stream)
+}
+
+// SessionStateData is the structure for session_snapshot in
+// JoinSessionResponse.
+message SessionStateData {
+  // Snapshot of all current peer assignments (PeerID and their roles) in the
+  // session.
+  client.p2p.AllPeerRoleAssignments all_role_assignments = 1;
+  // The current state of the video queue.
+  client.p2p.QueueUpdate current_queue_state = 2;
+  // The current global playback state (play/pause, position, speed).
+  // This is optional as it might not always be relevant or available on initial
+  // join.
+  optional client.p2p.SetPlaybackStateCmd current_playback_state = 3;
+  // Add other relevant session-wide states here as needed (e.g., session name,
+  // specific rules)
 }

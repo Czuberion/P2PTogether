@@ -20,6 +20,7 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"google.golang.org/grpc"
@@ -308,20 +309,43 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			}
 			log.Printf("Opened /auth/1 stream to Admin %s", adminInfo.ID)
 
-			// Next steps (sending AuthRequest, reading JoinSessionResponse from Admin) will be in the next increment.
-			// For now, placeholder:
-			authStream.Close() // Close the stream for now.
-			log.Printf("Placeholder: /auth/1 stream opened and closed. Full auth logic pending.")
+			// --- Send AuthRequest ---
+			authReq := &p2ppb.AuthRequest{
+				SessionId: sessionIDToJoin,
+				Username:  joiningUsername,
+			}
+			authReqBytes, err := proto.Marshal(authReq)
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to marshal AuthRequest: %v", err)
+				log.Println(errMsg)
+				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (marshal AuthRequest failed): %v", errSend)
+				}
+				authStream.Reset() // Or Close, Reset is more abrupt
+				continue
+			}
 
-			// TEMPORARY: Send a placeholder "discovery/connection successful, auth pending" to GUI.
-			// This will be replaced by the actual response from Admin via /auth/1.
-			tempResp := &p2ppb.JoinSessionResponse{
-				SessionId: sessionIDToJoin, // Echo back the session ID
-				// ErrorMessage: proto.String("Connected to Admin, authentication pending..."), // Or just success for now
+			_, err = authStream.Write(authReqBytes)
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to write AuthRequest to Admin %s: %v", adminInfo.ID, err)
+				log.Println(errMsg)
+				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (auth write failed): %v", errSend)
+				}
+				authStream.Reset()
+				continue
 			}
-			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: tempResp}}); errSend != nil {
-				log.Printf("Error sending temporary JoinSession success response: %v", errSend)
-			}
+			authStream.CloseWrite() // Signal Admin we're done writing
+			log.Printf("Sent AuthRequest to Admin %s for session %s. Username: %s", adminInfo.ID, sessionIDToJoin, joiningUsername)
+
+			// --- Read JoinSessionResponse from Admin ---
+			// This will be implemented more fully in the next increment.
+			// For now, the GUI will wait. Actual response processing is pending.
+			log.Printf("Waiting for JoinSessionResponse from Admin %s on /auth/1 stream...", adminInfo.ID)
+			// The JoinSessionResponse to the GUI will be sent after the Admin's response is processed.
+			// Placeholder tempResp removed.
 			continue
 
 		case *clientpb.ClientMsg_QueueCmd:
@@ -406,6 +430,70 @@ func (s *server) publishToChatTopic(ctx context.Context, msg *clientpb.ServerMsg
 		return fmt.Errorf("failed to publish ServerMsg (ChatMsg) to chatTopic: %w", err)
 	}
 	return nil
+}
+
+// handleAuthStream is called by the Admin peer when a Joiner opens a /p2ptogether/auth/1 stream.
+func (s *server) handleAuthStream(stream network.Stream) {
+	remotePeerID := stream.Conn().RemotePeer()
+	log.Printf("Admin: Received incoming /auth/1 stream from %s", remotePeerID)
+	defer stream.Close() // Ensure stream is closed eventually
+
+	// Read AuthRequest
+	// Assuming AuthRequest is relatively small, read it all.
+	// For larger messages, use a buffered reader or length-prefixing.
+	buf := make([]byte, 1024) // Max AuthRequest size
+	n, err := stream.Read(buf)
+	if err != nil {
+		log.Printf("Admin: Error reading AuthRequest from %s: %v", remotePeerID, err)
+		// Cannot send a JoinSessionResponse here easily if read fails before unmarshalling.
+		// The Joiner will experience a stream read error or timeout.
+		return
+	}
+
+	var authReq p2ppb.AuthRequest
+	if err := proto.Unmarshal(buf[:n], &authReq); err != nil {
+		log.Printf("Admin: Error unmarshalling AuthRequest from %s: %v", remotePeerID, err)
+		return
+	}
+	log.Printf("Admin: Received AuthRequest from %s for SessionID: %s, Username: %s", remotePeerID, authReq.GetSessionId(), authReq.GetUsername())
+
+	// Validate SessionID
+	session, exists := s.sessionManager.GetSession(authReq.GetSessionId())
+	if !exists {
+		log.Printf("Admin: Auth attempt from %s for non-existent session %s.", remotePeerID, authReq.GetSessionId())
+		errResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Session not found.")}
+		errRespBytes, _ := proto.Marshal(errResp)
+		_, _ = stream.Write(errRespBytes) // Best effort
+		return
+	}
+
+	if session.AdminPeerID != s.node.ID() {
+		log.Printf("Admin: Auth attempt for session %s, but this peer (%s) is not the admin (%s). Denying.", authReq.GetSessionId(), s.node.ID(), session.AdminPeerID)
+		errResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Authorization failed: not session admin.")}
+		errRespBytes, _ := proto.Marshal(errResp)
+		_, _ = stream.Write(errRespBytes) // Best effort
+		return
+	}
+
+	// Add peer to session with default "Viewer" role
+	_, _, err = s.sessionManager.AddPeerToSession(session.ID, remotePeerID, authReq.GetUsername(), []string{"Viewer"})
+	if err != nil {
+		log.Printf("Admin: Failed to add peer %s to session %s: %v", remotePeerID, session.ID, err)
+		errResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(fmt.Sprintf("Failed to add peer to session: %v", err))}
+		errRespBytes, _ := proto.Marshal(errResp)
+		_, _ = stream.Write(errRespBytes) // Best effort
+		return
+	}
+
+	// For this increment, send a simple success response.
+	// Snapshot population will be in the next increment.
+	successResp := &p2ppb.JoinSessionResponse{SessionId: session.ID, AssignedRoles: []string{"Viewer"}}
+	successRespBytes, _ := proto.Marshal(successResp)
+	if _, err := stream.Write(successRespBytes); err != nil {
+		log.Printf("Admin: Error writing success JoinSessionResponse to %s: %v", remotePeerID, err)
+	}
+	log.Printf("Admin: Peer %s successfully authenticated and added to session %s as Viewer.", remotePeerID, session.ID)
+	// TODO: Broadcast PeerRoleAssignment
 }
 
 // Handle incoming SetPeerRolesCmd
@@ -992,6 +1080,9 @@ func main() {
 
 	// Register IngestHandler with the fully initialized node (which can provide durations)
 	httpMux.HandleFunc("/ingest/", media.IngestHandler(rb, srvInstance.node))
+
+	// Register the /auth/1 stream handler
+	lhost.SetStreamHandler("/p2ptogether/auth/1", srvInstance.handleAuthStream)
 
 	subVideo, err := node.VideoTopic().Subscribe()
 	if err != nil {
