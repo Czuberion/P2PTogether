@@ -203,6 +203,14 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				}(stream.Context(), sessionIDCID, createdSession.ID) // Pass stream context for now
 			}
 
+			// Admin node joins the topics for the session it just created
+			if err := s.node.JoinSessionTopics(createdSession.ID); err != nil {
+				log.Printf("Admin node %s failed to join session topics for %s: %v", senderID, createdSession.ID, err)
+			} else {
+				// Update server's view of current topics
+				s.ctrlTopic = s.node.CtrlTopic()
+				s.chatTopic = s.node.ChatTopic()
+			}
 			log.Printf("TODO: Persist session %s for Admin %s (SR-SM-2)", createdSession.ID, nodeIDStr)
 
 			resp := &p2ppb.CreateSessionResponse{SessionId: createdSession.ID, InviteCode: createdSession.InviteCode}
@@ -505,6 +513,11 @@ func (s *server) processAdminJoinResponse(adminResp *p2ppb.JoinSessionResponse) 
 	// Subscribe to session-specific topics
 	if err := s.node.JoinSessionTopics(adminResp.GetSessionId()); err != nil {
 		log.Printf("Joiner: Failed to join session-specific pubsub topics for session %s: %v", adminResp.GetSessionId(), err)
+	} else {
+		// Update server's view of current topics for this joiner node
+		// This is important if the server struct's s.ctrlTopic/s.chatTopic are used by handlers
+		s.ctrlTopic = s.node.CtrlTopic()
+		s.chatTopic = s.node.ChatTopic()
 	}
 }
 
@@ -1184,26 +1197,6 @@ func main() {
 	}
 	node.SetDependencies(queueCtrl, roleManager, hub) // Inject dependencies into Node
 
-	videoTopic, err := ps.Join("/p2ptogether/video/1")
-	if err != nil {
-		log.Fatalf("join video topic: %v", err)
-	}
-	// session‑scoped topics – stub “default” until sessions exist
-	chatTopic, _ := ps.Join("/p2ptogether/chat/default")
-	ctrlTopic, _ := ps.Join("/p2ptogether/control/default")
-
-	// Pass the node's getter for ctrlTopic, so QueueController always uses the current one
-	queueCtrl.SetDependencies(node, hub, roleManager, node.CtrlTopic())
-
-	node.AttachGlobalTopics(videoTopic)
-	// Session-specific topics (chat, control) are joined by node.JoinSessionTopics()
-
-	// Subscribe to the control topic for various ServerMsg types
-	subCtrl, err := ctrlTopic.Subscribe()
-	if err != nil {
-		log.Fatalf("ctrl topic subscribe: %v", err)
-	}
-
 	if _, err := lhost.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged)); err != nil {
 		log.Fatalf("event‑bus subscribe failed: %v", err)
 	}
@@ -1218,11 +1211,22 @@ func main() {
 		dht:                     kadDHT,
 		sessionManager:          sessionMgr,
 		roleManager:             roleManager,
-		ctrlTopic:               ctrlTopic,
-		chatTopic:               chatTopic,
 		triggerHLSDircontinuity: triggerDiscontinuity,
 	}
 	clientpb.RegisterP2PTClientServer(grpcServer, srvInstance)
+
+	// Initialize node's default topics (it will manage them)
+	// These are "default" topics before any session is joined/created.
+	// Node.JoinSessionTopics will handle leaving these and joining specific ones.
+	if err := node.JoinSessionTopics("default"); err != nil {
+		log.Printf("Warning: Failed to join initial 'default' topics: %v", err)
+	}
+	// Set server's initial topics from the node's current topics (which are "default")
+	srvInstance.ctrlTopic = node.CtrlTopic()
+	srvInstance.chatTopic = node.ChatTopic()
+
+	// Pass the node's getter for ctrlTopic, so QueueController always uses the current one
+	queueCtrl.SetDependencies(node, hub, roleManager, node.CtrlTopic())
 
 	// Register IngestHandler with the fully initialized node (which can provide durations)
 	httpMux.HandleFunc("/ingest/", media.IngestHandler(rb, srvInstance.node))
@@ -1230,23 +1234,37 @@ func main() {
 	// Register the /auth/1 stream handler
 	lhost.SetStreamHandler("/p2ptogether/auth/1", srvInstance.handleAuthStream)
 
-	subVideo, err := node.VideoTopic().Subscribe()
-	if err != nil {
-		log.Fatalf("video topic subscribe for receiving failed: %v", err)
-	}
-
-	// Start background processors
-	go processControlTopicMessages(ctx, subCtrl, srvInstance)
-
-	// Chat topic subscription
-	subChat, err := chatTopic.Subscribe()
-	if err != nil {
-		log.Fatalf("Chat topic subscribe failed: %v", err)
-	}
-	go processChatTopicMessages(ctx, subChat, srvInstance) // New goroutine for chat
-
-	// Video topic subscription (for receiving segments)
-	go srvInstance.processVideoSegmentMessages(ctx, subVideo, rb)
+	go func() { // Goroutine for control messages
+		var sub *pubsub.Subscription
+		var currentTopicName string
+		for {
+			select {
+			case <-ctx.Done():
+				if sub != nil {
+					sub.Cancel()
+				}
+				return
+			default:
+				topic := srvInstance.node.CtrlTopic()
+				if topic != nil && (sub == nil || topic.String() != currentTopicName) {
+					if sub != nil {
+						sub.Cancel()
+					}
+					var errSub error
+					sub, errSub = topic.Subscribe()
+					if errSub != nil {
+						log.Printf("Error subscribing to control topic %s: %v. Retrying...", topic.String(), errSub)
+						time.Sleep(5 * time.Second)
+						continue
+					}
+					currentTopicName = topic.String()
+					log.Printf("Subscribed to control topic: %s", currentTopicName)
+					go processControlTopicMessages(ctx, sub, srvInstance) // process in its own goroutine to not block re-subscription
+				}
+				time.Sleep(1 * time.Second) // Check for topic changes periodically
+			}
+		}
+	}()
 
 	// Segment event processor (for publishing segments from local encoder)
 	go srvInstance.processSegmentEvents(ctx, rb)
@@ -1269,6 +1287,47 @@ func main() {
 		}
 	}()
 
+	// Goroutine for chat messages - more robust dynamic subscription
+	go func() {
+		var sub *pubsub.Subscription
+		var currentTopicName string
+		defer func() {
+			if sub != nil {
+				sub.Cancel()
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				topic := srvInstance.node.ChatTopic() // Get current chat topic from node
+				if topic != nil && (sub == nil || topic.String() != currentTopicName) {
+					if sub != nil {
+						sub.Cancel() // Cancel previous subscription
+					}
+					var errSub error
+					sub, errSub = topic.Subscribe()
+					if errSub != nil {
+						log.Printf("Error subscribing to chat topic %s: %v. Retrying...", topic.String(), errSub)
+						time.Sleep(5 * time.Second)
+						continue // Retry subscription
+					}
+					currentTopicName = topic.String()
+					log.Printf("Subscribed to chat topic: %s", currentTopicName)
+					// Dedicate a goroutine to pump messages from this specific subscription
+					// to avoid blocking the re-subscription loop.
+					go processChatTopicMessages(ctx, sub, srvInstance)
+				} else if topic == nil && sub != nil { // Current session ended, no topic
+					sub.Cancel()
+					sub = nil
+					currentTopicName = ""
+				}
+				time.Sleep(1 * time.Second) // Poll for topic changes
+			}
+		}
+	}()
+
 	// Libp2p connection event logger
 	connSub, _ := lhost.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged))
 	go func() {
@@ -1283,6 +1342,45 @@ func main() {
 				}
 				e := ev.(event.EvtPeerConnectednessChanged)
 				log.Printf("[conn] Peer %s: %s", e.Peer, e.Connectedness)
+			}
+		}
+	}()
+
+	// Goroutine for video segment messages
+	go func() {
+		var sub *pubsub.Subscription
+		var currentTopicName string
+		defer func() {
+			if sub != nil {
+				sub.Cancel()
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				topic := srvInstance.node.VideoTopic() // Get current video topic from node
+				if topic != nil && (sub == nil || topic.String() != currentTopicName) {
+					if sub != nil {
+						sub.Cancel() // Cancel previous subscription
+					}
+					var errSub error
+					sub, errSub = topic.Subscribe()
+					if errSub != nil {
+						log.Printf("Error subscribing to video topic %s: %v. Retrying...", topic.String(), errSub)
+						time.Sleep(5 * time.Second)
+						continue // Retry subscription
+					}
+					currentTopicName = topic.String()
+					log.Printf("Subscribed to video topic: %s", currentTopicName)
+					go srvInstance.processVideoSegmentMessages(ctx, sub, rb) // Process messages in a new goroutine
+				} else if topic == nil && sub != nil { // Current session ended
+					sub.Cancel()
+					sub = nil
+					currentTopicName = ""
+				}
+				time.Sleep(1 * time.Second) // Poll for topic changes
 			}
 		}
 	}()

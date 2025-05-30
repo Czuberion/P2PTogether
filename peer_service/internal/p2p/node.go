@@ -440,6 +440,10 @@ func (n *Node) JoinSessionTopics(sessionID string) error {
 		n.ctrlTopic.Close()
 		log.Printf("Node %s: Left previous control topic %s", n.ID(), n.ctrlTopic.String())
 	}
+	if n.videoTopic != nil {
+		n.videoTopic.Close()
+		log.Printf("Node %s: Left previous video topic %s", n.ID(), n.videoTopic.String())
+	}
 
 	var err error
 	n.chatTopic, err = n.ps.Join(fmt.Sprintf("/p2ptogether/chat/%s", sessionID))
@@ -451,17 +455,15 @@ func (n *Node) JoinSessionTopics(sessionID string) error {
 		n.chatTopic.Close() // Rollback chat topic join on control topic failure
 		return fmt.Errorf("failed to join control topic for session %s: %w", sessionID, err)
 	}
+	n.videoTopic, err = n.ps.Join(fmt.Sprintf("/p2ptogether/video/%s", sessionID))
+	if err != nil {
+		n.chatTopic.Close() // Rollback
+		n.ctrlTopic.Close() // Rollback
+		return fmt.Errorf("failed to join video topic for session %s: %w", sessionID, err)
+	}
 	n.currentSessionID = sessionID // Update current session ID
-	log.Printf("Node %s: Successfully joined chat (%s) and control (%s) topics for session %s", n.ID(), n.chatTopic.String(), n.ctrlTopic.String(), sessionID)
+	log.Printf("Node %s: Successfully joined chat (%s), control (%s), and video (%s) topics for session %s", n.ID(), n.chatTopic.String(), n.ctrlTopic.String(), n.videoTopic.String(), sessionID)
 	return nil
-}
-
-// AttachGlobalTopics stores the global topics (like video).
-// don’t have to pass them around explicitly.
-func (n *Node) AttachGlobalTopics(video *pubsub.Topic) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.videoTopic = video
 }
 
 func (n *Node) VideoTopic() *pubsub.Topic { n.mu.RLock(); defer n.mu.RUnlock(); return n.videoTopic }
