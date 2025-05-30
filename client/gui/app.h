@@ -97,7 +97,7 @@ private:
 signals:
     // Emitted when queue items or playing index changes
     void queueStateChanged();
-    // void sessionStateChanged(bool isActive); // Optional: for more granular
+    void sessionStateChanged(bool isActive);
     // UI updates
 };
 

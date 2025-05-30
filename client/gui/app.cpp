@@ -4,6 +4,8 @@
 #include "gui/right_panel.h"
 #include "gui/video_panel.h"
 #include "p2p/playback.pb.h"
+#include "p2p/queue.pb.h"
+#include "p2p/role.pb.h"
 #include "p2p/session.pb.h"
 #include "player/mpv_manager.h"
 #include "transport/grpc_client.h"
@@ -324,18 +326,72 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             clearActiveSessionDetails();
         } else {
             qInfo() << "GUI: Session joined successfully. ID:"
-                    << QString::fromStdString(resp.session_id());
-            // For Option B (InviteCode == SessionID), we can use session_id as
-            // the invite code for display/copy
+                    << QString::fromStdString(resp.session_id())
+                    << "Snapshot size:" << resp.session_snapshot().size();
+
             setActiveSessionDetails(QString::fromStdString(resp.session_id()),
                                     QString::fromStdString(resp.session_id()));
+
+            if (!resp.session_snapshot().empty()) {
+                client::p2p::SessionStateData session_state_data;
+                if (session_state_data.ParseFromString(
+                        resp.session_snapshot())) {
+                    qInfo() << "GUI: Successfully parsed SessionStateData "
+                               "snapshot.";
+
+                    if (session_state_data.has_all_role_assignments()) {
+                        m_roleStore->processAllPeerAssignments(
+                            session_state_data.all_role_assignments());
+                        qInfo() << "GUI: Processed all_role_assignments from "
+                                   "snapshot.";
+                    } else {
+                        qInfo() << "GUI: Snapshot does not contain "
+                                   "all_role_assignments.";
+                    }
+
+                    if (session_state_data.has_current_queue_state()) {
+                        const client::p2p::QueueUpdate& queue_update =
+                            session_state_data.current_queue_state();
+                        m_currentQueueItems.clear();
+                        for (const auto& item_proto : queue_update.items()) {
+                            m_currentQueueItems.append(item_proto);
+                        }
+                        qInfo() << "GUI: Processed current_queue_state from "
+                                   "snapshot. Items:"
+                                << m_currentQueueItems.size();
+                        emit queueStateChanged();
+                    } else {
+                        qInfo() << "GUI: Snapshot does not contain "
+                                   "current_queue_state.";
+                        // Ensure queue is cleared if snapshot implies it should
+                        // be empty
+                        if (m_currentQueueItems.size() > 0) {
+                            m_currentQueueItems.clear();
+                            emit queueStateChanged();
+                        }
+                    }
+                    // TODO: Process session_state_data.current_playback_state()
+                } else {
+                    qWarning() << "GUI: Failed to parse SessionStateData "
+                                  "snapshot from JoinSessionResponse.";
+                }
+            } else {
+                qInfo() << "GUI: JoinSessionResponse received without a "
+                           "session snapshot. Clearing local queue if any.";
+                // If no snapshot, ensure local state (like queue) is consistent
+                // (e.g., empty)
+                if (m_currentQueueItems.size() > 0) {
+                    m_currentQueueItems.clear();
+                    emit queueStateChanged();
+                }
+            }
+
             showSessionInfoDialog(
                 "Session Joined", "Successfully joined session!",
                 QString::fromStdString(resp.session_id()),
-                QString::fromStdString(resp.session_id()),
-                m_mainWindow); // Show session_id as invite code
-            // TODO: Process resp.session_snapshot()
-            // TODO: emit sessionStateChanged(true);
+                QString::fromStdString(resp.session_id()), m_mainWindow);
+
+            emit sessionStateChanged(true);
         }
     } break;
     // TODO: Handle kStreamStatus, kChatMsg
