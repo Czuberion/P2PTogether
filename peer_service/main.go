@@ -191,8 +191,11 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 			log.Printf("Session %s created by %s. Invite Code: %s", createdSession.ID, nodeIDStr, createdSession.InviteCode)
 
+			// Channel to signal completion of the advertisement verification
+			verificationCompleteChan := make(chan struct{})
+
 			// Advertise the session ID as a rendez-vous string with enhanced DHT propagation
-			go func(sessID string) {
+			go func(sessID string, verificationDone chan<- struct{}) {
 				// Use the stream's context for advertisement. When the stream (client connection) ends,
 				// the context will be cancelled, and dutil.Advertise will stop.
 				// This ties the advertisement lifecycle to the creator's connection.
@@ -220,6 +223,12 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 				// Verify our own advertisement is discoverable after a delay.
 				go func() {
+					defer func() {
+						log.Printf("Verification goroutine for session %s signaling completion.", sessID)
+						verificationDone <- struct{}{}
+						close(verificationDone) // Close channel to signal completion
+					}()
+
 					// Allow more time for DHT propagation in WAN scenarios before verification.
 					time.Sleep(15 * time.Second)
 					verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second) // Longer timeout for finding peers
@@ -230,6 +239,7 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 					if err != nil {
 						log.Printf("Advertisement verification FindPeers call failed for session %s: %v", sessID, err)
 						// The main dutil.Advertise(sessionAdvCtx, ...) should still be running.
+						// Signal completion via defer.
 						return
 					}
 
@@ -256,8 +266,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 						log.Printf("Attempting a fallback persistent re-advertisement for session %s due to verification failure", sessID)
 						dutil.Advertise(context.Background(), s.routingDiscovery, sessID)
 					}
+					// Signal completion via defer.
 				}()
-			}(createdSession.ID)
+			}(createdSession.ID, verificationCompleteChan)
 
 			// Admin node joins the topics for the session it just created
 			if err := s.node.JoinSessionTopics(createdSession.ID); err != nil {
@@ -268,6 +279,11 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				s.chatTopic = s.node.ChatTopic()
 			}
 			log.Printf("TODO: Persist session %s for Admin %s (SR-SM-2)", createdSession.ID, nodeIDStr)
+
+			// Wait for advertisement verification to complete before sending response
+			log.Printf("Waiting for advertisement verification to complete for session %s before sending response to client...", createdSession.ID)
+			<-verificationCompleteChan
+			log.Printf("Advertisement verification completed for session %s. Proceeding to send CreateSessionResponse.", createdSession.ID)
 
 			resp := &p2ppb.CreateSessionResponse{SessionId: createdSession.ID, InviteCode: createdSession.InviteCode}
 			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_CreateSessionResponse{CreateSessionResponse: resp}}); errSend != nil {
