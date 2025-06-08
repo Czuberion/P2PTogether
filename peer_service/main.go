@@ -11,18 +11,19 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/ipfs/go-cid"
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
-	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -64,6 +65,9 @@ type server struct {
 
 	// DHT for peer discovery and content routing
 	dht *dht.IpfsDHT
+
+	// routingDiscovery discovery.Discovery // Using the interface type
+	routingDiscovery *drouting.RoutingDiscovery // Use the concrete type
 
 	triggerHLSDircontinuity func()
 }
@@ -187,21 +191,73 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 			log.Printf("Session %s created by %s. Invite Code: %s", createdSession.ID, nodeIDStr, createdSession.InviteCode)
 
-			sessionIDCID, cidErr := common.StringToCID(createdSession.ID)
-			if cidErr != nil {
-				log.Printf("Error converting SessionID %s to CID: %v. DHT Provide skipped.", createdSession.ID, cidErr)
-			} else {
-				go func(ctx context.Context, c cid.Cid, sessID string) { // Pass context and sessionID for logging
-					log.Printf("Attempting DHT Provide for SessionID %s (CID: %s)", sessID, c.String())
-					provideCtx, provideCancel := context.WithTimeout(context.Background(), 60*time.Second) // Example timeout
-					defer provideCancel()
-					if errProvide := s.dht.Provide(provideCtx, c, true); errProvide != nil {
-						log.Printf("DHT Provide for SessionID %s (CID %s) failed: %v", sessID, c.String(), errProvide)
-					} else {
-						log.Printf("Successfully Provided SessionID %s (CID %s) on DHT", sessID, c.String())
+			// Advertise the session ID as a rendez-vous string with enhanced DHT propagation
+			go func(sessID string) {
+				// Use the stream's context for advertisement. When the stream (client connection) ends,
+				// the context will be cancelled, and dutil.Advertise will stop.
+				// This ties the advertisement lifecycle to the creator's connection.
+				sessionAdvCtx := stream.Context()
+
+				log.Printf("Starting persistent DHT advertisement for session %s using stream context", sessID)
+				log.Printf("DHT routing table size: %d", s.dht.RoutingTable().Size())
+				if s.dht.RoutingTable().Size() > 0 {
+					dhtPeers := s.dht.RoutingTable().ListPeers()
+					peerCount := len(dhtPeers)
+					if peerCount > 5 {
+						peerCount = 5
 					}
-				}(stream.Context(), sessionIDCID, createdSession.ID) // Pass stream context for now
-			}
+					log.Printf("Sample DHT peers (first %d): %v", peerCount, dhtPeers[:peerCount])
+				}
+
+				// Initial and persistent advertisement.
+				// dutil.Advertise will run in the background, periodically re-advertising
+				// until sessionAdvCtx is cancelled.
+				log.Printf("Initiating persistent advertisement for session %s via DHT", sessID)
+				log.Printf("DHT routing table size before advertisement: %d", s.dht.RoutingTable().Size())
+				log.Printf("Our peer ID: %s", s.node.ID())
+				dutil.Advertise(sessionAdvCtx, s.routingDiscovery, sessID)
+				log.Printf("Persistent advertisement process started for session %s", sessID)
+
+				// Verify our own advertisement is discoverable after a delay.
+				go func() {
+					// Allow more time for DHT propagation in WAN scenarios before verification.
+					time.Sleep(15 * time.Second)
+					verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second) // Longer timeout for finding peers
+					defer verifyCancel()
+
+					log.Printf("Verifying advertisement propagation for session %s", sessID)
+					peerChan, err := s.routingDiscovery.FindPeers(verifyCtx, sessID)
+					if err != nil {
+						log.Printf("Advertisement verification FindPeers call failed for session %s: %v", sessID, err)
+						// The main dutil.Advertise(sessionAdvCtx, ...) should still be running.
+						return
+					}
+
+					foundSelf := false
+					peerCount := 0
+					for pInfo := range peerChan { // Loop will stop when channel is closed (e.g. by timeout)
+						if pInfo.ID == "" { // Skip empty AddrInfo
+							continue
+						}
+						peerCount++
+						if pInfo.ID == s.node.ID() {
+							foundSelf = true
+							// No need to break, let's see how many peers are found in total for logging.
+						}
+					}
+
+					if foundSelf {
+						log.Printf("Advertisement verification SUCCESS: Session %s self-discovery confirmed. Found %d peers (including self).", sessID, peerCount)
+					} else {
+						log.Printf("Advertisement verification WARNING: Session %s self-discovery failed. Found %d other peers. The session might not be reliably discoverable.", sessID, peerCount)
+						// The main advertisement (tied to sessionAdvCtx) should still be active.
+						// This fallback advertisement uses context.Background(), making it independent of the stream.
+						// This is a strong measure if the primary advertisement mechanism faces issues.
+						log.Printf("Attempting a fallback persistent re-advertisement for session %s due to verification failure", sessID)
+						dutil.Advertise(context.Background(), s.routingDiscovery, sessID)
+					}
+				}()
+			}(createdSession.ID)
 
 			// Admin node joins the topics for the session it just created
 			if err := s.node.JoinSessionTopics(createdSession.ID); err != nil {
@@ -221,76 +277,392 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 		case *clientpb.ClientMsg_JoinSessionRequest:
 			req := cmd.JoinSessionRequest
-			log.Printf("[gRPC Recv %s] JoinSessionRequest: InviteCode='%s', User='%s'", nodeIDStr, req.GetInviteCode(), req.GetUsername())
-
-			sessionIDToJoin := req.GetInviteCode()
-			joiningUsername := req.GetUsername()
-			_ = joiningUsername // Acknowledge use until implemented
-
-			sessionIDCID, cidErr := common.StringToCID(sessionIDToJoin)
-			if cidErr != nil {
-				log.Printf("Error converting InviteCode (SessionID) %s to CID: %v. Cannot FindProviders.", sessionIDToJoin, cidErr)
-				resp := &p2ppb.JoinSessionResponse{
-					ErrorMessage: proto.String(fmt.Sprintf("Invalid invite code format: %v", cidErr)),
-				}
-				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
-					log.Printf("Error sending JoinSession error response (CID): %v", errSend)
-				}
-				continue
+			sessionIDToJoin := req.InviteCode
+			joiningUsername := ""
+			if req.Username != nil {
+				joiningUsername = *req.Username
 			}
 
-			log.Printf("Attempting DHT FindProviders for SessionID CID: %s (from InviteCode %s)", sessionIDCID.String(), sessionIDToJoin)
+			log.Printf("Attempting DHT FindPeers for session: %s with enhanced discovery timing", sessionIDToJoin)
+			log.Printf("Our peer ID: %s", s.node.ID())
+			log.Printf("Our external addresses: %v", s.node.Addrs())
 
-			findProvidersCtx, findProvidersCancel := context.WithTimeout(stream.Context(), 30*time.Second) // 30-second timeout for discovery
-			defer findProvidersCancel()
+			// Check DHT connectivity before discovery
+			connected := s.dht.RoutingTable().Size()
+			log.Printf("DHT routing table size: %d peers", connected)
 
-			providers, err := s.dht.FindProviders(findProvidersCtx, sessionIDCID)
-			if err != nil {
-				log.Printf("DHT FindProviders for %s failed: %v", sessionIDCID.String(), err)
-				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Failed to find session provider (DHT error).")}
-				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
-					log.Printf("Error sending JoinSession error response (DHT FindProviders): %v", errSend)
+			// Log some of the DHT peers we're connected to
+			if connected > 0 {
+				dhtPeers := s.dht.RoutingTable().ListPeers()
+				peerCount := len(dhtPeers)
+				if peerCount > 5 {
+					peerCount = 5
 				}
-				continue
+				log.Printf("Sample DHT peers (first %d): %v", peerCount, dhtPeers[:peerCount])
 			}
-			log.Printf("DHT FindProviders for %s initiated. Waiting for Admin peer info...", sessionIDCID.String())
-			// TODO: Iterate peerChan, connect to Admin, perform /auth/1, then send actual JoinSessionResponse.
-			// For this increment, we're just testing discovery. We'll send a placeholder success/failure based on discovery.
-			// This part will be expanded significantly.
 
 			var adminInfo *peer.AddrInfo
 			var foundAdmin bool
 
-			// Iterate over the providers found.
-			// For WAN demo, we assume the first valid provider is the Admin.
-			// More robust logic might be needed for multiple providers.
-			for _, pInfo := range providers {
-				if pInfo.ID == s.node.ID() {
-					log.Printf("Found self (%s) as provider for session %s. Skipping.", s.node.ID(), sessionIDToJoin)
+			// Enhanced DHT discovery with proper timing for provider record propagation
+			maxRetries := 4 // Increased retry count
+			for attempt := 1; attempt <= maxRetries; attempt++ {
+				log.Printf("DHT discovery attempt %d/%d for session %s", attempt, maxRetries, sessionIDToJoin)
+
+				// Progressive timeout increase to allow for DHT propagation
+				baseTimeout := 8 + (attempt * 3) // 11s, 14s, 17s, 20s
+				timeoutDuration := time.Duration(baseTimeout) * time.Second
+
+				// For early attempts, add additional delay to account for advertisement propagation
+				if attempt == 1 {
+					log.Printf("First discovery attempt - waiting extra time for DHT propagation...")
+					time.Sleep(5 * time.Second) // Wait for provider record propagation
+				} else if attempt == 2 {
+					log.Printf("Second discovery attempt - allowing more propagation time...")
+					time.Sleep(3 * time.Second) // Additional propagation time
+				}
+
+				findPeersCtx, findPeersCancel := context.WithTimeout(stream.Context(), timeoutDuration)
+
+				peerChan, err := s.routingDiscovery.FindPeers(findPeersCtx, sessionIDToJoin)
+				if err != nil {
+					log.Printf("DHT FindPeers attempt %d failed: %v", attempt, err)
+					findPeersCancel()
 					continue
 				}
-				log.Printf("Found potential admin provider for session %s: %s with addrs %v", sessionIDToJoin, pInfo.ID, pInfo.Addrs)
-				adminInfo = &pInfo // pInfo is already peer.AddrInfo, so assign its address
-				foundAdmin = true
-				break // Use the first one found
+
+				// Process peers found for this session
+				peerCount := 0
+				for pInfo := range peerChan {
+					peerCount++
+					log.Printf("Discovery attempt %d: Found peer %d: %s with addrs %v", attempt, peerCount, pInfo.ID, pInfo.Addrs)
+
+					if pInfo.ID == s.node.ID() {
+						log.Printf("Found self (%s) as provider. Skipping.", s.node.ID())
+						continue
+					}
+					log.Printf("Found potential admin for session %s: %s", sessionIDToJoin, pInfo.ID)
+					adminInfo = &pInfo
+					foundAdmin = true
+					break
+				}
+
+				log.Printf("Discovery attempt %d completed. Peers found: %d", attempt, peerCount)
+				findPeersCancel()
+
+				if foundAdmin {
+					log.Printf("Successfully found admin after attempt %d", attempt)
+					break // Exit retry loop
+				}
+
+				if attempt < maxRetries {
+					// Exponential backoff with additional DHT propagation considerations
+					backoffDelay := time.Duration(attempt*3+2) * time.Second // 5s, 8s, 11s
+					log.Printf("No admin found in attempt %d, waiting %v before retry (allowing DHT propagation)", attempt, backoffDelay)
+					time.Sleep(backoffDelay)
+				}
 			}
 
 			if !foundAdmin {
-				errMsg := fmt.Sprintf("No providers found for session %s on the DHT.", sessionIDToJoin)
-				log.Println(errMsg)
-				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
-				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
-					log.Printf("Error sending JoinSession error response (no providers): %v", errSend)
+				log.Printf("DHT discovery failed for session %s. Attempting FALLBACK STRATEGIES...", sessionIDToJoin)
+
+				// FALLBACK STRATEGY 1: Enhanced Peer Exchange via Connected Peers
+				log.Printf("=== FALLBACK: ENHANCED PEER EXCHANGE STRATEGY ===")
+				connectedPeers := s.node.Network().Peers()
+				log.Printf("Total connected peers: %d. Filtering for application peers...", len(connectedPeers))
+
+				// Filter connected peers to find those that might be application peers
+				// Application peers should have protocol support or be directly reachable
+				appPeers := make([]peer.ID, 0)
+				for _, connectedPeer := range connectedPeers {
+					// Check if peer supports our protocol or has been seen with our protocol
+					protocols, err := s.node.Peerstore().GetProtocols(connectedPeer)
+					if err == nil {
+						for _, proto := range protocols {
+							if strings.Contains(string(proto), "p2ptogether") {
+								appPeers = append(appPeers, connectedPeer)
+								break
+							}
+						}
+					}
 				}
-				continue
+
+				log.Printf("Found %d potential application peers out of %d total peers", len(appPeers), len(connectedPeers))
+
+				// Try peer exchange with application peers first
+				peersToTry := appPeers
+				if len(peersToTry) == 0 {
+					// Fallback to trying first 5 connected peers if no app peers found
+					maxTryCount := 5
+					if len(connectedPeers) < maxTryCount {
+						maxTryCount = len(connectedPeers)
+					}
+					peersToTry = connectedPeers[:maxTryCount]
+					log.Printf("No application peers found, trying first %d connected peers", len(peersToTry))
+				}
+
+				for i, connectedPeer := range peersToTry {
+					if i >= 10 { // Still limit to avoid spam
+						break
+					}
+					log.Printf("Peer exchange attempt %d: Asking peer %s about session %s", i+1, connectedPeer, sessionIDToJoin)
+
+					// Try to connect and ask this peer if they know about the session
+					exchangeCtx, exchangeCancel := context.WithTimeout(stream.Context(), 3*time.Second) // Shorter timeout
+
+					// Simple approach: Try to open a temporary stream to see if this peer might be the admin
+					tempStream, err := s.node.NewStream(exchangeCtx, connectedPeer, "/p2ptogether/auth/1")
+					if err != nil {
+						log.Printf("Peer exchange: Peer %s doesn't support /auth/1 protocol: %v", connectedPeer, err)
+						exchangeCancel()
+						continue
+					}
+
+					// Send a test auth request to see if this peer manages our target session
+					testAuth := &p2ppb.AuthRequest{
+						SessionId: sessionIDToJoin,
+						Username:  "discovery-test", // Special username for discovery
+					}
+					testAuthBytes, err := proto.Marshal(testAuth)
+					if err != nil {
+						tempStream.Close()
+						exchangeCancel()
+						continue
+					}
+
+					_, err = tempStream.Write(testAuthBytes)
+					if err != nil {
+						log.Printf("Peer exchange: Failed to write test auth to peer %s: %v", connectedPeer, err)
+						tempStream.Close()
+						exchangeCancel()
+						continue
+					}
+
+					// Try to read response with shorter timeout
+					respBuf := make([]byte, 1024)
+					tempStream.SetReadDeadline(time.Now().Add(2 * time.Second))
+					n, err := tempStream.Read(respBuf)
+					tempStream.Close()
+					exchangeCancel()
+
+					if err != nil {
+						log.Printf("Peer exchange: No response from peer %s: %v", connectedPeer, err)
+						continue
+					}
+
+					var authResp p2ppb.JoinSessionResponse
+					if err := proto.Unmarshal(respBuf[:n], &authResp); err != nil {
+						log.Printf("Peer exchange: Invalid response from peer %s: %v", connectedPeer, err)
+						continue
+					}
+
+					// Check if this peer acknowledged the session (even with an error)
+					if authResp.ErrorMessage != nil && !strings.Contains(*authResp.ErrorMessage, "Session not found") {
+						log.Printf("Peer exchange: SUCCESS! Found session admin at %s", connectedPeer)
+						// This peer knows about the session, use it as adminInfo
+						peerInfo := s.node.Peerstore().PeerInfo(connectedPeer)
+						adminInfo = &peerInfo
+						foundAdmin = true
+						break
+					} else {
+						log.Printf("Peer exchange: Peer %s doesn't manage session %s", connectedPeer, sessionIDToJoin)
+					}
+				}
+
+				if !foundAdmin {
+					// FALLBACK STRATEGY 2: Direct Local Network Discovery via mDNS
+					log.Printf("=== FALLBACK: LOCAL NETWORK DISCOVERY (mDNS) ===")
+					log.Printf("Attempting to discover session admin via local network...")
+
+					// For local network environments, Alice and Bob might be on the same LAN
+					// but in different DHT partitions. Try mDNS approach.
+					// Since we're already connected to many peers, check if any have our target session
+
+					// Look through our connected peers for any that might have recently advertised sessions
+					log.Printf("Checking recently connected peers for session patterns...")
+
+					// Get list of peers we're connected to via libp2p network
+					connectedViaNetwork := s.node.Network().Conns()
+					log.Printf("Active network connections: %d", len(connectedViaNetwork))
+
+					// Try to find the session admin by checking peer IDs we've seen recently
+					// This is a simple approach for local network discovery
+					for _, conn := range connectedViaNetwork {
+						if conn.RemotePeer() == s.node.ID() {
+							continue // Skip self
+						}
+
+						// Try to establish if this peer might be running our application
+						log.Printf("Testing connection to peer %s for application presence", conn.RemotePeer())
+
+						testCtx, testCancel := context.WithTimeout(stream.Context(), 2*time.Second)
+						testStream, err := s.node.NewStream(testCtx, conn.RemotePeer(), "/p2ptogether/auth/1")
+						if err != nil {
+							testCancel()
+							continue // Not an application peer
+						}
+
+						// This peer supports our protocol, test for session
+						testAuth := &p2ppb.AuthRequest{
+							SessionId: sessionIDToJoin,
+							Username:  "discovery-test",
+						}
+						testAuthBytes, _ := proto.Marshal(testAuth)
+						testStream.Write(testAuthBytes)
+
+						respBuf := make([]byte, 1024)
+						testStream.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+						n, err := testStream.Read(respBuf)
+						testStream.Close()
+						testCancel()
+
+						if err == nil && n > 0 {
+							var authResp p2ppb.JoinSessionResponse
+							if proto.Unmarshal(respBuf[:n], &authResp) == nil {
+								if authResp.ErrorMessage == nil || !strings.Contains(*authResp.ErrorMessage, "Session not found") {
+									log.Printf("Local discovery: SUCCESS! Found session admin at %s", conn.RemotePeer())
+									peerInfo := s.node.Peerstore().PeerInfo(conn.RemotePeer())
+									adminInfo = &peerInfo
+									foundAdmin = true
+									break
+								}
+							}
+						}
+					}
+				}
+
+				if !foundAdmin {
+					// FALLBACK STRATEGY 3: Enhanced Bootstrap Peer Discovery
+					log.Printf("=== FALLBACK: ENHANCED BOOTSTRAP DISCOVERY ===")
+					log.Printf("Attempting to discover session via enhanced bootstrap methods...")
+
+					// Try to re-bootstrap with additional peers and expand our DHT view
+					log.Printf("Re-bootstrapping DHT to expand network view...")
+					bootstrapCtx, bootstrapCancel := context.WithTimeout(stream.Context(), 15*time.Second) // Shorter timeout
+
+					if err := s.dht.Bootstrap(bootstrapCtx); err != nil {
+						log.Printf("Fallback bootstrap failed: %v", err)
+					} else {
+						log.Printf("Fallback bootstrap completed, DHT size now: %d", s.dht.RoutingTable().Size())
+
+						// Try one more round of discovery after bootstrap with just the primary key
+						log.Printf("Post-bootstrap discovery attempt for session %s", sessionIDToJoin)
+						postBootstrapCtx, postBootstrapCancel := context.WithTimeout(stream.Context(), 10*time.Second) // Shorter timeout
+
+						peerChan, err := s.routingDiscovery.FindPeers(postBootstrapCtx, sessionIDToJoin)
+						if err != nil {
+							log.Printf("Post-bootstrap discovery failed: %v", err)
+						} else {
+							for pInfo := range peerChan {
+								if pInfo.ID != s.node.ID() {
+									log.Printf("Post-bootstrap: Found session admin %s", pInfo.ID)
+									adminInfo = &pInfo
+									foundAdmin = true
+									break
+								}
+							}
+						}
+						postBootstrapCancel()
+					}
+					bootstrapCancel()
+				}
+
+				if !foundAdmin {
+					errMsg := fmt.Sprintf("No providers found for session %s on the DHT after exhaustive search (standard DHT + peer exchange + bootstrap).", sessionIDToJoin)
+					log.Println(errMsg)
+					resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+					if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
+						log.Printf("Error sending JoinSession error response (no providers): %v", errSend)
+					}
+					continue
+				} else {
+					log.Printf("SUCCESS: Found session admin via fallback strategy: %s", adminInfo.ID)
+				}
 			}
 
+			// ENHANCED CONNECTION ESTABLISHMENT WITH NAT TRAVERSAL
+			log.Printf("=== ENHANCED CONNECTION ESTABLISHMENT ===")
 			log.Printf("Attempting to connect to Admin %s for session %s", adminInfo.ID, sessionIDToJoin)
-			connectCtx, connectCancel := context.WithTimeout(stream.Context(), 15*time.Second) // Timeout for connection attempt
-			defer connectCancel()
+			log.Printf("Admin multiaddresses: %v", adminInfo.Addrs)
 
-			if err := s.node.Connect(connectCtx, *adminInfo); err != nil {
-				errMsg := fmt.Sprintf("Failed to connect to session Admin %s: %v", adminInfo.ID, err)
+			// Check our current connectivity status
+			log.Printf("Our host connectivity: %s", s.node.Network().Connectedness(adminInfo.ID))
+			log.Printf("Our external addresses: %v", s.node.Addrs())
+
+			var connectionSuccessful bool
+			var connectionMethod string
+
+			// Strategy 1: Direct connection with multiple attempts
+			for attempt := 1; attempt <= 3 && !connectionSuccessful; attempt++ {
+				log.Printf("Direct connection attempt %d/3 to Admin %s", attempt, adminInfo.ID)
+
+				connectCtx, connectCancel := context.WithTimeout(stream.Context(), time.Duration(10+attempt*5)*time.Second)
+
+				if err := s.node.Connect(connectCtx, *adminInfo); err != nil {
+					log.Printf("Direct connection attempt %d failed: %v", attempt, err)
+					connectCancel()
+
+					// Wait before retry
+					if attempt < 3 {
+						time.Sleep(time.Duration(attempt) * time.Second)
+					}
+				} else {
+					log.Printf("Direct connection attempt %d SUCCESSFUL!", attempt)
+					connectionSuccessful = true
+					connectionMethod = "direct"
+					connectCancel()
+					break
+				}
+			}
+
+			// Strategy 2: If direct connection failed, try to use relay
+			if !connectionSuccessful {
+				log.Printf("=== ATTEMPTING RELAY CONNECTION ===")
+
+				// First, let's identify potential relay peers
+				connectedPeers := s.node.Network().Peers()
+				log.Printf("Connected peers available for relay: %d", len(connectedPeers))
+
+				relayAttempts := 0
+				maxRelayAttempts := 2
+
+				for _, relayPeer := range connectedPeers {
+					if relayPeer == s.node.ID() || relayPeer == adminInfo.ID {
+						continue // Skip self and target
+					}
+
+					if relayAttempts >= maxRelayAttempts {
+						break
+					}
+
+					relayAttempts++
+					log.Printf("Relay attempt %d: Trying to connect to %s via relay %s", relayAttempts, adminInfo.ID, relayPeer)
+
+					// Create a circuit relay address to the target through this relay
+					relayAddr := fmt.Sprintf("/p2p/%s/p2p-circuit/p2p/%s", relayPeer, adminInfo.ID)
+					relayAddrInfo, err := peer.AddrInfoFromString(relayAddr)
+					if err != nil {
+						log.Printf("Failed to parse relay address %s: %v", relayAddr, err)
+						continue
+					}
+
+					relayCtx, relayCancel := context.WithTimeout(stream.Context(), 20*time.Second)
+					if err := s.node.Connect(relayCtx, *relayAddrInfo); err != nil {
+						log.Printf("Relay connection via %s failed: %v", relayPeer, err)
+						relayCancel()
+					} else {
+						log.Printf("Relay connection via %s SUCCESSFUL!", relayPeer)
+						connectionSuccessful = true
+						connectionMethod = fmt.Sprintf("relay via %s", relayPeer)
+						relayCancel()
+						break
+					}
+				}
+			}
+
+			// Final connection validation
+			if !connectionSuccessful {
+				errMsg := fmt.Sprintf("Failed to establish connection to session Admin %s after trying direct and relay methods. Both peers may be behind symmetric NATs.", adminInfo.ID)
 				log.Println(errMsg)
 				resp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
 				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: resp}}); errSend != nil {
@@ -299,6 +671,8 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				continue
 			}
 
+			log.Printf("Connection ESTABLISHED to Admin %s using %s method. Connectivity: %s",
+				adminInfo.ID, connectionMethod, s.node.Network().Connectedness(adminInfo.ID))
 			log.Printf("Successfully connected to Admin %s for session %s. Proceeding to /auth/1 protocol.", adminInfo.ID, sessionIDToJoin)
 
 			// --- Phase 2: Task 4 (Initiate /auth/1) ---
@@ -778,7 +1152,8 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 }
 
 // buildHost sets up a real libp2p Host plus mDNS discovery and Kademlia DHT.
-func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT) {
+// Returns host, dht, and *drouting.RoutingDiscovery
+func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT, *drouting.RoutingDiscovery) {
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(
 			"/ip4/0.0.0.0/tcp/0",
@@ -787,34 +1162,65 @@ func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT) {
 			"/ip6/::/udp/0/quic",
 		),
 		libp2p.EnableNATService(),
-		libp2p.EnableRelay(),        // Enable p2p-circuit relay (both client and server)
-		libp2p.EnableHolePunching(), // Enable hole punching
+		libp2p.NATPortMap(),
+		libp2p.EnableRelay(),
+		libp2p.EnableHolePunching(),
+		// libp2p.ForceReachabilityPrivate(),
+		libp2p.DefaultTransports,
 	)
 	if err != nil {
 		log.Fatalf("libp2p host init failed: %v", err)
 	}
 
-	// Initialize Kademlia DHT in server mode.
-	// BootstrapPeers are usually hardcoded or discovered through other means (e.g., mDNS for local, then expanding).
-	// For LAN, mDNS might be sufficient to find initial peers.
+	// kademliaDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeAutoServer))
 	kademliaDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer))
+	// kademliaDHT, err := dht.New(ctx, h)
 	if err != nil {
 		log.Fatalf("Kademlia DHT init failed: %v", err)
 	}
 
-	// mDNS for zero-conf LAN discovery
-	// Pass DHT to notifee if it needs to interact with it (e.g., add discovered peers)
-	mdnsSvc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{h: h, dht: kademliaDHT})
-	if err := mdnsSvc.Start(); err != nil {
-		log.Fatalf("mDNS start failed: %v", err)
+	// Connect to an initial set of bootstrap peers.
+	// DefaultBootstrapPeers are public P2P nodes that help new peers join the network.
+	log.Println("Connecting to bootstrap peers...")
+	var wg sync.WaitGroup
+	successfulConnections := 0
+	for _, peerAddr := range dht.DefaultBootstrapPeers {
+		peerInfo, err := peer.AddrInfoFromP2pAddr(peerAddr)
+		if err != nil {
+			log.Printf("Error parsing bootstrap peer address %s: %v", peerAddr, err)
+			continue
+		}
+		wg.Add(1)
+		go func(pi peer.AddrInfo) {
+			defer wg.Done()
+			// Use a timeout for each connection attempt to avoid indefinite blocking.
+			connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := h.Connect(connectCtx, pi); err != nil {
+				log.Printf("Warning: Failed to connect to bootstrap peer %s: %v", pi.ID, err)
+			} else {
+				log.Printf("Successfully connected to bootstrap peer: %s", pi.ID)
+				successfulConnections++
+			}
+		}(*peerInfo)
+	}
+	wg.Wait()
+	log.Printf("Finished attempting to connect to bootstrap peers. Success: %d/%d", successfulConnections, len(dht.DefaultBootstrapPeers))
+
+	// Bootstrap the DHT. This will populate the DHT routing table with peers.
+	log.Println("Bootstrapping DHT...")
+	if err = kademliaDHT.Bootstrap(ctx); err != nil {
+		log.Fatalf("DHT bootstrap failed: %v", err)
 	}
 
-	// Bootstrap the DHT. In a real-world scenario, this would connect to predefined bootstrap nodes.
-	// For LAN, we can rely on mDNS to find some initial peers, and then DHT can discover more.
-	// Or, if you have known bootstrap peers on the LAN, add them here.
-	if err = kademliaDHT.Bootstrap(ctx); err != nil {
-		log.Printf("DHT bootstrap failed: %v (continuing, will rely on mDNS/connections)", err)
-		// Don't fatal, as for LAN, mDNS might connect peers and DHT can build from there.
+	// Give DHT some time to populate routing table
+	log.Println("Waiting for DHT to populate routing table...")
+	time.Sleep(2 * time.Second)
+	routingTableSize := kademliaDHT.RoutingTable().Size()
+	log.Printf("DHT bootstrap completed. Routing table size: %d", routingTableSize)
+
+	if routingTableSize == 0 {
+		log.Printf("Warning: DHT routing table is empty after bootstrap. This may affect discovery.")
 	}
 
 	log.Printf("Libp2p Host created with ID: %s", h.ID().String())
@@ -822,7 +1228,18 @@ func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT) {
 		log.Printf("Listening on address: %s/p2p/%s", addr, h.ID().String())
 	}
 
-	return h, kademliaDHT
+	// return h, kademliaDHT
+	routingDiscovery := drouting.NewRoutingDiscovery(kademliaDHT)
+
+	return h, kademliaDHT, routingDiscovery
+}
+
+// mDNS is still useful for local LAN discovery or complementing DHT for WAN.
+func startMdnsDiscovery(h host.Host, dht *dht.IpfsDHT) {
+	mdnsSvc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{h: h, dht: dht})
+	if err := mdnsSvc.Start(); err != nil {
+		log.Printf("mDNS start failed: %v (continuing without mDNS)", err)
+	}
 }
 
 // processControlTopicMessages handles all incoming ServerMsg messages from the ctrlTopic.
@@ -1163,8 +1580,9 @@ func main() {
 	grpcServer := grpc.NewServer()
 
 	// 3) libp2p + GossipSub
-	lhost, kadDHT := buildHost(ctx)
+	lhost, kadDHT, routingDiscovery := buildHost(ctx)
 	ps, err := pubsub.NewGossipSub(ctx, lhost)
+	// startMdnsDiscovery(lhost, kadDHT)
 	if err != nil {
 		log.Fatalf("GossipSub init failed: %v", err)
 	}
@@ -1197,10 +1615,6 @@ func main() {
 	}
 	node.SetDependencies(queueCtrl, roleManager, hub) // Inject dependencies into Node
 
-	if _, err := lhost.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged)); err != nil {
-		log.Fatalf("event‑bus subscribe failed: %v", err)
-	}
-
 	// clientpb.RegisterP2PTClientServer(grpcServer, &server{
 	// Define the server instance that holds all dependencies
 	srvInstance := &server{
@@ -1211,6 +1625,7 @@ func main() {
 		dht:                     kadDHT,
 		sessionManager:          sessionMgr,
 		roleManager:             roleManager,
+		routingDiscovery:        routingDiscovery,
 		triggerHLSDircontinuity: triggerDiscontinuity,
 	}
 	clientpb.RegisterP2PTClientServer(grpcServer, srvInstance)
@@ -1324,24 +1739,6 @@ func main() {
 					currentTopicName = ""
 				}
 				time.Sleep(1 * time.Second) // Poll for topic changes
-			}
-		}
-	}()
-
-	// Libp2p connection event logger
-	connSub, _ := lhost.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged))
-	go func() {
-		defer connSub.Close()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-connSub.Out():
-				if !ok {
-					return
-				}
-				e := ev.(event.EvtPeerConnectednessChanged)
-				log.Printf("[conn] Peer %s: %s", e.Peer, e.Connectedness)
 			}
 		}
 	}()
