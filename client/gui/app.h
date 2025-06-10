@@ -24,6 +24,7 @@
 #include <QApplication>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QString>
 
 namespace gui {
 
@@ -63,6 +64,7 @@ private slots:
 
 private:
     quint16 m_grpcPort;
+    QString m_localUsername;
     P2P::Roles::RoleStore* m_roleStore = nullptr;
     P2P::ControlStreamWorker* m_worker = nullptr;
     QMainWindow* m_mainWindow          = nullptr;
@@ -98,6 +100,11 @@ signals:
     // Emitted when queue items or playing index changes
     void queueStateChanged();
     void sessionStateChanged(bool isActive);
+    void sessionCreatedSuccessfully(const QString& sessionID,
+                                    const QString& inviteCode);
+    void sessionCreationFailed(const QString& errorMessage);
+    void chatMessageReceived(const QString& senderName,
+                             const QString& messageText, bool isSelf);
     // UI updates
 };
 

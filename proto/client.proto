@@ -19,13 +19,6 @@ message ServiceInfo {
   uint32 hls_port = 1;
 }
 
-// Sent by the service to the client upon successful ControlStream connection or
-// as part of initial state, identifying the client's effective peer ID as
-// recognized by this service instance for the current session.
-message LocalPeerIdentity {
-  string peer_id = 1; // The libp2p Peer ID string of this service node.
-}
-
 /* ——— Streaming wrappers ——— */
 
 message ClientMsg {
@@ -53,7 +46,7 @@ message ServerMsg {
     client.p2p.RoleDefinitionsUpdate role_definitions_update = 5;
     client.p2p.PeerRoleAssignment peer_role_assignment = 6;
     client.p2p.AllPeerRoleAssignments all_peer_role_assignments = 7;
-    LocalPeerIdentity local_peer_identity = 8;
+    client.p2p.LocalPeerIdentity local_peer_identity = 8;
     client.p2p.SetPlaybackStateCmd playback_state_cmd = 9;
     client.p2p.PlaylistReset playlist_reset = 10;
     client.p2p.CreateSessionResponse create_session_response = 11;

@@ -1,6 +1,10 @@
 #include "right_panel.h"
+#include "client.pb.h"
 #include "p2p/peer.h"
 #include "roles/permissions.h"
+#include "transport/control_stream_worker.h"
+
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
@@ -61,21 +65,43 @@ QWidget* createRightPanel(gui::App* app, P2P::Peer* peer, QMainWindow* window,
     QPushButton* sendButton = new QPushButton("Send");
     chatInputLayout->addWidget(chatInput, 1);
     chatInputLayout->addWidget(sendButton);
-    QObject::connect(sendButton, &QPushButton::clicked,
-                     [chatInput, chatMessages]() {
+    QObject::connect(
+        sendButton, &QPushButton::clicked, [chatInput, chatMessages, worker]() {
+            QString msg = chatInput->text();
+            if (!msg.isEmpty()) {
+                if (worker) {
+                    client::ClientMsg clientMsg;
+                    auto* chatCmdProto = clientMsg.mutable_chat_cmd();
+                    chatCmdProto->set_text(msg.toStdString());
+                    chatCmdProto->set_hlc_ts(
+                        QDateTime::currentMSecsSinceEpoch());
+                    worker->send(clientMsg);
+                }
+                chatInput->clear();
+            }
+        });
+    QObject::connect(chatInput, &QLineEdit::returnPressed,
+                     [chatInput, chatMessages, worker]() {
                          QString msg = chatInput->text();
                          if (!msg.isEmpty()) {
-                             chatMessages->append("Me: " + msg);
+                             if (worker) {
+                                 client::ClientMsg clientMsg;
+                                 auto* chatCmdProto =
+                                     clientMsg.mutable_chat_cmd();
+                                 chatCmdProto->set_text(msg.toStdString());
+                                 chatCmdProto->set_hlc_ts(
+                                     QDateTime::currentMSecsSinceEpoch());
+                                 worker->send(clientMsg);
+                             }
                              chatInput->clear();
                          }
                      });
-    QObject::connect(chatInput, &QLineEdit::returnPressed,
-                     [chatInput, chatMessages]() {
-                         QString msg = chatInput->text();
-                         if (!msg.isEmpty()) {
-                             chatMessages->append("Me: " + msg);
-                             chatInput->clear();
-                         }
+    QObject::connect(app, &gui::App::chatMessageReceived, chatMessages,
+                     [chatMessages](const QString& senderName,
+                                    const QString& messageText,
+                                    bool /*isSelf*/) {
+                         chatMessages->append(
+                             QString("%1: %2").arg(senderName, messageText));
                      });
     chatLayout->addWidget(chatMessages);
     chatLayout->addWidget(chatInputWidget);

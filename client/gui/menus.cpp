@@ -32,11 +32,9 @@ std::function<void()> SidebarToggleCallback;
 
 // Helper function moved here or to a common utility. For now, static in this
 // TU.
-static void showSessionInfoDialogHelper(const QString& title,
-                                        const QString& messageBody,
-                                        const QString& sessionId,
-                                        const QString& inviteCode,
-                                        QWidget* parent) {
+static void showSessionInfoDialogHelper(
+    const QString& title, const QString& messageBody, const QString& sessionId,
+    const QString& sessionName, const QString& inviteCode, QWidget* parent) {
     QDialog infoDialog(parent);
     infoDialog.setWindowTitle(title);
     QVBoxLayout* layout = new QVBoxLayout(&infoDialog);
@@ -45,6 +43,10 @@ static void showSessionInfoDialogHelper(const QString& title,
     if (!sessionId.isEmpty()) {
         layout->addWidget(
             new QLabel(QString("Session ID: %1").arg(sessionId), &infoDialog));
+    }
+    if (!sessionName.isEmpty()) {
+        layout->addWidget(new QLabel(
+            QString("Session Name: %1").arg(sessionName), &infoDialog));
     }
 
     if (!inviteCode.isEmpty()) {
@@ -239,14 +241,40 @@ void createMenus(QMainWindow* window, gui::App* app,
                              &createDialog, &QDialog::reject);
 
             if (createDialog.exec() == QDialog::Accepted) {
+                QString requestedSessionName = sessionNameInput->text();
+                QString requestedUsername    = usernameInput->text();
+
+                // Disconnect previous connections if any to avoid multiple
+                // dialogs It's safer to use unique connections or ensure App
+                // handles one-shot signals. For this, we'll assume App's
+                // signals are emitted once per response.
+                QObject::connect(
+                    app, &gui::App::sessionCreatedSuccessfully, window,
+                    [requestedSessionName, window](const QString& sid,
+                                                   const QString& invCode) {
+                        showSessionInfoDialogHelper( // Call static helper in
+                                                     // menus.cpp
+                            "Session Created", "Session successfully created!",
+                            sid, requestedSessionName, invCode, window);
+                    },
+                    Qt::SingleShotConnection); // Ensure it only fires once
+
+                QObject::connect(
+                    app, &gui::App::sessionCreationFailed, window,
+                    [window](const QString& errorMsg) {
+                        QMessageBox::critical(window, "Session Creation Failed",
+                                              errorMsg);
+                    },
+                    Qt::SingleShotConnection); // Ensure it only fires once
+
                 client::ClientMsg clientMsg;
                 // Use the correct generated type:
                 // client::p2p::CreateSessionRequest
                 client::p2p::CreateSessionRequest* req =
                     clientMsg.mutable_create_session_request();
 
-                QString sessionName = sessionNameInput->text();
-                QString username    = usernameInput->text();
+                QString sessionName = requestedSessionName;
+                QString username    = requestedUsername;
 
                 if (!sessionName.isEmpty()) {
                     req->set_session_name(sessionName.toStdString());
@@ -393,6 +421,10 @@ void createMenus(QMainWindow* window, gui::App* app,
     // For simplicity, let's assume App will have a sessionStateChanged signal
     // eventually. For now, connect to RoleStore signals that imply a possible
     // change in permissions or session context.
+    if (app) { // Connect to App's signal if app is valid
+        QObject::connect(app, &gui::App::sessionStateChanged, window,
+                         updateSessionActions);
+    }
     if (roleStore) {
         QObject::connect(
             roleStore, &P2P::Roles::RoleStore::peerRolesChanged, window,

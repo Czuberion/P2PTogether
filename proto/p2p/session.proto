@@ -7,6 +7,15 @@ import "p2p/role.proto";
 import "p2p/queue.proto";
 import "p2p/playback.proto";
 
+// Sent by the service to the client upon successful ControlStream connection or
+// as part of initial state, identifying the client's effective peer ID as
+// recognized by this service instance for the current session.
+message LocalPeerIdentity {
+  string peer_id = 1; // The libp2p Peer ID string of this service node.
+  // The username confirmed for this peer in the session.
+  optional string username = 2;
+}
+
 message CreateSessionRequest {
   optional string session_name = 1;
   // User-chosen display name for the Admin creating the session
@@ -37,8 +46,10 @@ message JoinSessionResponse {
   // Serialized initial state (e.g., current roles, queue). Can be empty
   // initially.
   bytes session_snapshot = 3;
+  // Name of the session that was joined
+  optional string session_name = 4;
   // If join failed.
-  optional string error_message = 4;
+  optional string error_message = 5;
 }
 
 // AuthRequest is sent by the Joiner to the Admin over the /auth/1 stream.
@@ -63,4 +74,5 @@ message SessionStateData {
   optional client.p2p.SetPlaybackStateCmd current_playback_state = 3;
   // Add other relevant session-wide states here as needed (e.g., session name,
   // specific rules)
+  repeated client.p2p.LocalPeerIdentity all_peer_identities = 5;
 }

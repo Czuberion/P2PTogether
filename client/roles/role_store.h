@@ -41,6 +41,8 @@ public:
     void setLocalPeerId(const QString& peerId);
     // To be used by GUI components
     QString getLocalPeerId() const;
+    void storePeerUsername(const QString& peerId, const QString& username);
+    QString getPeerUsername(const QString& peerId) const;
     // Gets assigned role names for a peer
     QVector<QString> getAssignedRoleNames(const QString& peerId) const;
     // Gets the HLC timestamp of a peer's last role assignment
@@ -72,6 +74,7 @@ private:
 
     // Store the true local peer ID
     QString localPeerId;
+    QMap<QString, QString> peerUsernames; // peerId -> username
 
     // Mutex for thread-safe access to the internal maps.
     // QReadWriteLock is good if reads are much more frequent than writes.

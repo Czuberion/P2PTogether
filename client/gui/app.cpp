@@ -31,6 +31,7 @@
 static void showSessionInfoDialog(const QString& title,
                                   const QString& messageBody,
                                   const QString& sessionId,
+                                  const QString& sessionName,
                                   const QString& inviteCode, QWidget* parent) {
     QDialog infoDialog(parent);
     infoDialog.setWindowTitle(title);
@@ -40,6 +41,10 @@ static void showSessionInfoDialog(const QString& title,
     if (!sessionId.isEmpty()) {
         layout->addWidget(
             new QLabel(QString("Session ID: %1").arg(sessionId), &infoDialog));
+    }
+    if (!sessionName.isEmpty()) {
+        layout->addWidget(new QLabel(
+            QString("Session Name: %1").arg(sessionName), &infoDialog));
     }
 
     if (!inviteCode.isEmpty()) {
@@ -73,6 +78,7 @@ App::App(quint16 grpcPort, QObject* parent) :
     // QObject(parent), m_grpcPort(grpcPort), m_lastAppliedPlaybackHlc(-1) {
     QObject(parent),
     m_grpcPort(grpcPort),
+    m_localUsername(""),
     m_lastAppliedPlaybackHlc(-1),
     m_playlistOriginSec(0.0),
     m_activePlaylistSequenceId(0),
@@ -95,22 +101,40 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             << msg.payload_case();
 
     switch (msg.payload_case()) {
-    case client::ServerMsg::kRoleDefinitionsUpdate:
+    case client::ServerMsg::kRoleDefinitionsUpdate: {
         m_roleStore->processRoleDefinitionsUpdate(
             msg.role_definitions_update());
         break;
-    case client::ServerMsg::kPeerRoleAssignment:
+    }
+    case client::ServerMsg::kPeerRoleAssignment: {
         m_roleStore->processPeerRoleAssignment(msg.peer_role_assignment());
         break;
-    case client::ServerMsg::kAllPeerRoleAssignments:
+    }
+    case client::ServerMsg::kAllPeerRoleAssignments: {
         m_roleStore->processAllPeerAssignments(msg.all_peer_role_assignments());
         break;
-    case client::ServerMsg::kLocalPeerIdentity:
+    }
+    case client::ServerMsg::kLocalPeerIdentity: {
         m_roleStore->setLocalPeerId(
             QString::fromStdString(msg.local_peer_identity().peer_id()));
-        qInfo() << "GUI: Received LocalPeerIdentity, my ID is now:"
-                << m_roleStore->getLocalPeerId();
-        break;
+        QString receivedPeerId =
+            QString::fromStdString(msg.local_peer_identity().peer_id());
+        qInfo() << "GUI: Received LocalPeerIdentity for peer:"
+                << receivedPeerId;
+
+        if (msg.local_peer_identity().has_username()) {
+            QString username =
+                QString::fromStdString(msg.local_peer_identity().username());
+            m_roleStore->storePeerUsername(receivedPeerId, username);
+            if (m_roleStore->getLocalPeerId() ==
+                receivedPeerId) { // Check if it's for our local peer
+                m_localUsername =
+                    username; // Update App's direct m_localUsername too
+                qInfo() << "GUI: My username (local peer) confirmed/updated to:"
+                        << m_localUsername;
+            }
+        }
+    } break;
     case client::ServerMsg::kPlaybackStateCmd: {
         if (!m_mpvWidget || !m_mpvManager) {
             qWarning() << "Received PlaybackStateCmd but m_mpvWidget is null!";
@@ -285,7 +309,7 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             emit queueStateChanged();
         }
     } break;
-    case client::ServerMsg::kQueueUpdate:
+    case client::ServerMsg::kQueueUpdate: {
         m_currentQueueItems.clear();
         for (const auto& item : msg.queue_update().items()) {
             m_currentQueueItems.append(item);
@@ -298,24 +322,21 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                "primarily handled by right_panel. Updating App's queue cache.";
         emit queueStateChanged(); // Emit signal as queue items list changed
         break;
+    }
     case client::ServerMsg::kCreateSessionResponse: {
         const auto& resp = msg.create_session_response();
         if (resp.has_error_message()) {
-            QMessageBox::critical(m_mainWindow, "Session Creation Failed",
-                                  QString::fromStdString(resp.error_message()));
             clearActiveSessionDetails();
+            emit sessionCreationFailed(
+                QString::fromStdString(resp.error_message()));
+            emit sessionStateChanged(false);
         } else {
-            qInfo() << "GUI: Session created successfully. ID:"
-                    << QString::fromStdString(resp.session_id())
-                    << "Invite Code:"
-                    << QString::fromStdString(resp.invite_code());
             setActiveSessionDetails(QString::fromStdString(resp.session_id()),
                                     QString::fromStdString(resp.invite_code()));
-            showSessionInfoDialog(
-                "Session Created", "Session successfully created!",
+            emit sessionCreatedSuccessfully(
                 QString::fromStdString(resp.session_id()),
-                QString::fromStdString(resp.invite_code()), m_mainWindow);
-            // TODO: emit sessionStateChanged(true);
+                QString::fromStdString(resp.invite_code()));
+            emit sessionStateChanged(true);
         }
     } break;
     case client::ServerMsg::kJoinSessionResponse: {
@@ -324,6 +345,7 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             QMessageBox::critical(m_mainWindow, "Join Session Failed",
                                   QString::fromStdString(resp.error_message()));
             clearActiveSessionDetails();
+            emit sessionStateChanged(false);
         } else {
             qInfo() << "GUI: Session joined successfully. ID:"
                     << QString::fromStdString(resp.session_id())
@@ -331,6 +353,11 @@ void App::onServerMessage(const client::ServerMsg& msg) {
 
             setActiveSessionDetails(QString::fromStdString(resp.session_id()),
                                     QString::fromStdString(resp.session_id()));
+            QString sessionNameFromJoinResp;
+            if (resp.has_session_name()) {
+                sessionNameFromJoinResp =
+                    QString::fromStdString(resp.session_name());
+            }
 
             if (!resp.session_snapshot().empty()) {
                 client::p2p::SessionStateData session_state_data;
@@ -338,6 +365,29 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                         resp.session_snapshot())) {
                     qInfo() << "GUI: Successfully parsed SessionStateData "
                                "snapshot.";
+
+                    if (session_state_data.all_peer_identities_size() > 0) {
+                        for (const auto& identity :
+                             session_state_data.all_peer_identities()) {
+                            m_roleStore->storePeerUsername(
+                                QString::fromStdString(identity.peer_id()),
+                                QString::fromStdString(identity.username()));
+                            // If this identity is for the local peer, update
+                            // m_localUsername
+                            if (m_roleStore->getLocalPeerId() ==
+                                QString::fromStdString(identity.peer_id())) {
+                                if (identity.has_username()) {
+                                    m_localUsername = QString::fromStdString(
+                                        identity.username());
+                                    qInfo() << "GUI: My username set to:"
+                                            << m_localUsername
+                                            << "from join snapshot.";
+                                }
+                            }
+                        }
+                        qInfo() << "GUI: Processed all_peer_identities from "
+                                   "snapshot.";
+                    }
 
                     if (session_state_data.has_all_role_assignments()) {
                         m_roleStore->processAllPeerAssignments(
@@ -370,6 +420,17 @@ void App::onServerMessage(const client::ServerMsg& msg) {
                             emit queueStateChanged();
                         }
                     }
+
+                    // Process roles *after* queue, as role processing might
+                    // trigger UI updates that depend on queue state (though
+                    // less likely here).
+                    if (session_state_data.has_all_role_assignments()) {
+                        m_roleStore->processAllPeerAssignments(
+                            session_state_data.all_role_assignments());
+                        qInfo() << "GUI: Processed all_role_assignments from "
+                                   "snapshot.";
+                    }
+
                     // TODO: Process session_state_data.current_playback_state()
                 } else {
                     qWarning() << "GUI: Failed to parse SessionStateData "
@@ -389,12 +450,36 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             showSessionInfoDialog(
                 "Session Joined", "Successfully joined session!",
                 QString::fromStdString(resp.session_id()),
-                QString::fromStdString(resp.session_id()), m_mainWindow);
+                sessionNameFromJoinResp,
+                "", // No invite code to display/copy for "joined" dialog
+                m_mainWindow);
 
             emit sessionStateChanged(true);
         }
     } break;
-    // TODO: Handle kStreamStatus, kChatMsg
+    case client::ServerMsg::kChatMsg: {
+        const auto& chat_msg_proto = msg.chat_msg();
+        QString sender_id    = QString::fromStdString(chat_msg_proto.sender());
+        QString message_text = QString::fromStdString(chat_msg_proto.text());
+        QString local_id_from_store;
+
+        if (m_roleStore)
+            local_id_from_store = m_roleStore->getLocalPeerId();
+        bool is_self = (!local_id_from_store.isEmpty() &&
+                        sender_id == local_id_from_store);
+
+        QString sender_name_to_display;
+        if (is_self) {
+            sender_name_to_display =
+                m_localUsername.isEmpty() ? sender_id : m_localUsername;
+        } else {
+            sender_name_to_display =
+                m_roleStore ? m_roleStore->getPeerUsername(sender_id) : "";
+            if (sender_name_to_display.isEmpty())
+                sender_name_to_display = sender_id;
+        }
+        emit chatMessageReceived(sender_name_to_display, message_text, is_self);
+    } break;
     default:
         qInfo() << "App::onServerMessage: Unhandled message type:"
                 << msg.payload_case();

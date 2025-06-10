@@ -13,6 +13,8 @@ RoleStore::RoleStore(QObject* parent) : QObject(parent) {
         "client::p2p::PeerRoleAssignment");
     qRegisterMetaType<client::p2p::AllPeerRoleAssignments>(
         "client::p2p::AllPeerRoleAssignments");
+    qRegisterMetaType<client::p2p::LocalPeerIdentity>(
+        "client::LocalPeerIdentity");
     // qRegisterMetaType<client::ServerMsg>("client::ServerMsg"); // Already
     // done by ControlStreamWorker probably
 }
@@ -230,6 +232,26 @@ void RoleStore::setLocalPeerId(const QString& peerId) {
 QString RoleStore::getLocalPeerId() const {
     QReadLocker locker(&storeLock);
     return localPeerId;
+}
+
+void RoleStore::storePeerUsername(const QString& peerId,
+                                  const QString& username) {
+    if (peerId.isEmpty())
+        return;
+    QWriteLocker locker(&storeLock);
+    if (!username.isEmpty()) {
+        peerUsernames[peerId] = username;
+    } else {
+        peerUsernames.remove(peerId); // Remove if username is empty (e.g., peer
+                                      // left or never had one)
+    }
+}
+
+QString RoleStore::getPeerUsername(const QString& peerId) const {
+    if (peerId.isEmpty())
+        return "";
+    QReadLocker locker(&storeLock);
+    return peerUsernames.value(peerId, ""); // Return empty if not found
 }
 
 } // namespace Roles

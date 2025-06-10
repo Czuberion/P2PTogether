@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -79,7 +80,19 @@ func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientp
 // Send initial state (role definitions, all assignments, current queue) to a newly connected client.
 func (s *server) sendInitialState(stream clientpb.P2PTClient_ControlStreamServer) {
 	// 1. Send Local Peer Identity first
-	identityMsg := &clientpb.LocalPeerIdentity{PeerId: s.node.ID().String()}
+	var localUsername string
+	currentSessID := s.node.GetCurrentSessionID()
+	if currentSessID != "" && currentSessID != "default" { // Only fetch username if in a real session
+		currentSession, sessExists := s.sessionManager.GetSession(currentSessID)
+		if sessExists {
+			if userInfo, userExists := currentSession.Members[s.node.ID()]; userExists {
+				localUsername = userInfo.Username
+			}
+		}
+	}
+
+	identityMsg := &p2ppb.LocalPeerIdentity{PeerId: s.node.ID().String()}
+	identityMsg.Username = &localUsername // Assign optional username
 	if err := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_LocalPeerIdentity{LocalPeerIdentity: identityMsg}}); err != nil {
 		log.Printf("Error sending LocalPeerIdentity to client for node %s: %v", s.node.ID(), err)
 		return // If this fails, further state is problematic
@@ -167,6 +180,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_PlaybackStreamCompletedCmd); ok {
 			hlc = cmdPl.PlaybackStreamCompletedCmd.HlcTs
 			cmdTypeString = fmt.Sprintf("PlaybackStreamCompletedCmd (StreamSeq: %d)", cmdPl.PlaybackStreamCompletedCmd.StreamSequenceId)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_ChatCmd); ok {
+			hlc = cmdPl.ChatCmd.HlcTs
+			cmdTypeString = fmt.Sprintf("ChatCmd (Text: '%.20s...')", cmdPl.ChatCmd.Text)
 		} else {
 			cmdTypeString = fmt.Sprintf("Unknown type %T", clientMsg.Payload)
 		}
@@ -278,6 +294,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				s.ctrlTopic = s.node.CtrlTopic()
 				s.chatTopic = s.node.ChatTopic()
 			}
+
+			// Send an updated LocalPeerIdentity for the admin now that they are in a session with a username
+			s.sendInitialState(stream) // Or a more targeted LocalPeerIdentity update
 			log.Printf("TODO: Persist session %s for Admin %s (SR-SM-2)", createdSession.ID, nodeIDStr)
 
 			// Wait for advertisement verification to complete before sending response
@@ -285,8 +304,8 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			<-verificationCompleteChan
 			log.Printf("Advertisement verification completed for session %s. Proceeding to send CreateSessionResponse.", createdSession.ID)
 
-			resp := &p2ppb.CreateSessionResponse{SessionId: createdSession.ID, InviteCode: createdSession.InviteCode}
-			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_CreateSessionResponse{CreateSessionResponse: resp}}); errSend != nil {
+			createResp := &p2ppb.CreateSessionResponse{SessionId: createdSession.ID, InviteCode: createdSession.InviteCode}
+			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_CreateSessionResponse{CreateSessionResponse: createResp}}); errSend != nil {
 				log.Printf("Error sending CreateSessionResponse: %v", errSend)
 			}
 			continue // Successfully handled, move to next client message
@@ -827,6 +846,26 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			log.Printf("[gRPC Recv %s] Processing PlaybackStreamCompletedCmd for stream %d, HLC: %d", nodeIDStr, pbStreamCompletedCmd.StreamSequenceId, pbStreamCompletedCmd.HlcTs)
 			s.queueCtrl.NotifyPlayerStreamCompleted(pbStreamCompletedCmd.StreamSequenceId, senderID)
 
+		case *clientpb.ClientMsg_ChatCmd:
+			chatCmdProto := cmd.ChatCmd
+			log.Printf("[gRPC Recv %s] Processing ChatCmd: Text='%.50s', HLC: %d", nodeIDStr, chatCmdProto.Text, chatCmdProto.HlcTs)
+
+			// Create p2ppb.ChatMsg for broadcast
+			chatMsgProto := &p2ppb.ChatMsg{
+				MessageId: uuid.NewString(), // Generate a unique ID for the message
+				Sender:    senderID.String(),
+				Text:      chatCmdProto.Text,
+				HlcTs:     chatCmdProto.HlcTs,
+				// ReplyTo: chatCmdProto.ReplyTo, // If/when supporting replies
+			}
+			serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_ChatMsg{ChatMsg: chatMsgProto}}
+
+			// Broadcast to local hub first for immediate echo
+			s.hub.Broadcast(serverPayload)
+
+			// Publish to chat topic
+			_ = s.publishToChatTopic(stream.Context(), serverPayload) // Error already logged by helper
+
 		default:
 			log.Printf("[gRPC Recv %s] Unhandled ClientMsg payload type: %T", nodeIDStr, clientMsg.Payload)
 		}
@@ -856,9 +895,14 @@ func (s *server) publishToControlTopic(ctx context.Context, msg *clientpb.Server
 
 // Helper to publish any ServerMsg (specifically ChatMsg) payload to the chat topic
 func (s *server) publishToChatTopic(ctx context.Context, msg *clientpb.ServerMsg) error {
-	if s.chatTopic == nil {
+	// chatTopic := s.chatTopic // Use the server's view of the current topic
+	chatTopic := s.node.ChatTopic() // More robust: get current topic from node
+	if chatTopic == nil {
 		return fmt.Errorf("chat topic is nil, cannot publish chat message")
 	}
+	topicPeers := chatTopic.ListPeers()
+	log.Printf("[gossip ChatPublish] Attempting to publish to topic %s. Connected peers on this topic by PubSub: %d. Peers: %v", chatTopic.String(), len(topicPeers), topicPeers)
+
 	marshalledMsg, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal ServerMsg (ChatMsg) for chat broadcast: %w", err)
@@ -998,11 +1042,21 @@ func (s *server) handleAuthStream(stream network.Stream) {
 	// 	}
 	// }
 
+	// Populate all_peer_identities for the snapshot
+	allIdentities := make([]*p2ppb.LocalPeerIdentity, 0, len(session.Members))
+	for pid, uinfo := range session.Members {
+		allIdentities = append(allIdentities, &p2ppb.LocalPeerIdentity{
+			PeerId:   pid.String(),
+			Username: &uinfo.Username,
+		})
+	}
+
 	sessionStateData := &p2ppb.SessionStateData{
 		AllRoleAssignments: allAssignmentsPb,
 		CurrentQueueState:  queueUpdatePb,
 		// CurrentPlaybackState: currentPlaybackCmd, // Add when ready
 	}
+	sessionStateData.AllPeerIdentities = allIdentities
 	snapshotBytes, errMarshal := proto.Marshal(sessionStateData)
 	if errMarshal != nil {
 		log.Printf("Admin: Failed to marshal SessionStateData for peer %s: %v", remotePeerID, errMarshal)
@@ -1013,34 +1067,54 @@ func (s *server) handleAuthStream(stream network.Stream) {
 		return
 	}
 
-	successResp := &p2ppb.JoinSessionResponse{SessionId: session.ID, AssignedRoles: []string{"Viewer"}, SessionSnapshot: snapshotBytes}
+	successResp := &p2ppb.JoinSessionResponse{
+		SessionId:       session.ID,
+		AssignedRoles:   []string{"Viewer"},
+		SessionSnapshot: snapshotBytes,
+		SessionName:     proto.String(session.Name),
+	}
 	successRespBytes, _ := proto.Marshal(successResp)
 	if _, err := stream.Write(successRespBytes); err != nil {
 		log.Printf("Admin: Error writing success JoinSessionResponse to %s: %v", remotePeerID, err)
 	}
 	log.Printf("Admin: Peer %s successfully authenticated and added to session %s as Viewer. Snapshot sent (%d bytes).", remotePeerID, session.ID, len(snapshotBytes))
 
-	// Broadcast PeerRoleAssignment for the new joiner
+	// Broadcast PeerRoleAssignment and LocalPeerIdentity for the new joiner
 	newMemberAssignment := &p2ppb.PeerRoleAssignment{
 		PeerId:            remotePeerID.String(),
 		AssignedRoleNames: []string{"Viewer"}, // Roles assigned during AddPeerToSession
 		HlcTs:             common.GetCurrentHLC(),
 	}
+	newMemberIdentity := &p2ppb.LocalPeerIdentity{
+		PeerId:   remotePeerID.String(),
+		Username: &authReq.Username, // Username from their AuthRequest
+	}
+
+	serverMsgIdentityPayload := &clientpb.ServerMsg{
+		Payload: &clientpb.ServerMsg_LocalPeerIdentity{LocalPeerIdentity: newMemberIdentity},
+	}
 	serverMsgPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: newMemberAssignment}}
 
 	// Broadcast to Admin's own GUI
 	s.hub.Broadcast(serverMsgPayload)
+	s.hub.Broadcast(serverMsgIdentityPayload)
 
 	// Broadcast to other peers in the session via GossipSub control topic
 	// TODO: Ensure s.ctrlTopic is correctly initialized and session-specific if needed
-	if s.ctrlTopic != nil { // s.ctrlTopic is currently global, needs to be session-specific
+	ctrlTopic := s.node.CtrlTopic() // Get current session's control topic
+	if ctrlTopic != nil {
 		if err := s.publishToControlTopic(context.Background(), serverMsgPayload); err != nil { // Using Background context for now
 			log.Printf("Admin: Error publishing PeerRoleAssignment for %s to control topic: %v", remotePeerID, err)
 		} else {
 			log.Printf("Admin: Published PeerRoleAssignment for new joiner %s to control topic.", remotePeerID)
 		}
+		if err := s.publishToControlTopic(context.Background(), serverMsgIdentityPayload); err != nil {
+			log.Printf("Admin: Error publishing LocalPeerIdentity for %s to control topic: %v", remotePeerID, err)
+		} else {
+			log.Printf("Admin: Published LocalPeerIdentity for new joiner %s to control topic.", remotePeerID)
+		}
 	} else {
-		log.Printf("Admin: Control topic is nil, cannot publish PeerRoleAssignment for %s.", remotePeerID)
+		log.Printf("Admin: Control topic is nil, cannot publish updates for %s.", remotePeerID)
 	}
 }
 
@@ -1294,6 +1368,8 @@ func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, 
 			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_PlaybackStateCmd:
 			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, srv)
+		case *clientpb.ServerMsg_LocalPeerIdentity:
+			handleGossipLocalPeerIdentity(payload.LocalPeerIdentity, msg.ReceivedFrom, srv)
 		default:
 			log.Printf("[gossip Ctrl] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
 		}
@@ -1317,6 +1393,11 @@ func processChatTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv
 
 		if msg.ReceivedFrom == myID {
 			continue // Skip messages broadcast by self
+		}
+
+		currentChatTopicSub := sub // The subscription object itself
+		if currentChatTopicSub != nil && srv.node != nil && srv.node.PubSubInstance() != nil {
+			log.Printf("[gossip ChatRecv] Node %s processing message on topic %s. Known peers by PubSub for this topic: %v", myID, currentChatTopicSub.Topic(), srv.node.PubSubInstance().ListPeers(currentChatTopicSub.Topic()))
 		}
 
 		var serverMsg clientpb.ServerMsg
@@ -1411,6 +1492,18 @@ func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, 
 	serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaybackStateCmd{PlaybackStateCmd: cmd}} // Updated ServerMsg field
 
 	srv.hub.Broadcast(serverMsg) // Send to the connected GUI client(s)
+}
+
+// handleGossipLocalPeerIdentity processes a LocalPeerIdentity message received via GossipSub.
+// This is typically for learning about other peers' usernames.
+func handleGossipLocalPeerIdentity(identity *p2ppb.LocalPeerIdentity, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipLocalPeerIdentity: for peer %s (user: %s) from %s", identity.PeerId, identity.GetUsername(), from)
+
+	// We just need to forward this to our local GUI client.
+	// The GUI client's RoleStore will handle storing the username.
+	// The client's App will update its own m_localUsername if this identity.PeerId matches its own.
+	serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_LocalPeerIdentity{LocalPeerIdentity: identity}}
+	srv.hub.Broadcast(serverMsg)
 }
 
 // processSegmentEvents listens for new segments from the local RingBuffer (written by ffmpeg via IngestHandler),
