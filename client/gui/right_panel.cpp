@@ -58,7 +58,6 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
     // Chat messages area
     QTextEdit* chatMessages = new QTextEdit();
     chatMessages->setReadOnly(true);
-    chatMessages->append("System: Welcome to P2PTogether!");
     chatMessages->setMinimumHeight(200);
 
     // Chat input area
@@ -101,13 +100,15 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                              chatInput->clear();
                          }
                      });
-    QObject::connect(app, &gui::App::chatMessageReceived, chatMessages,
-                     [chatMessages](const QString& senderName,
-                                    const QString& messageText,
-                                    bool /*isSelf*/) {
-                         chatMessages->append(
-                             QString("%1: %2").arg(senderName, messageText));
-                     });
+    QObject::connect(
+        app, &gui::App::chatMessageReceived, chatMessages,
+        [chatMessages](const QString& senderName, const QString& messageText,
+                       bool /*isSelf*/) {
+            QString formattedMessage = QString("<b>%1</b>: %2")
+                                           .arg(senderName.toHtmlEscaped(),
+                                                messageText.toHtmlEscaped());
+            chatMessages->append(formattedMessage);
+        });
     chatLayout->addWidget(chatMessages);
     chatLayout->addWidget(chatInputWidget);
 
@@ -390,34 +391,53 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                      });
 
     // Info-button behaviour
-    QObject::connect(infoBtn, &QPushButton::clicked, [queueList, window]() {
-        int row = queueList->currentRow();
-        if (row < 0)
-            return;
+    QObject::connect(
+        infoBtn, &QPushButton::clicked, [queueList, window, roleStore]() {
+            int row = queueList->currentRow();
+            if (row < 0)
+                return;
 
-        QListWidgetItem* it    = queueList->item(row);
-        const QString filePath = it->data(Qt::UserRole).toString();
-        const QString storedBy = it->data(Qt::UserRole + 1).toString();
-        const QString addedBy  = it->data(Qt::UserRole + 2).toString();
-        const QString fileName = QFileInfo(filePath).fileName();
+            QListWidgetItem* it      = queueList->item(row);
+            const QString filePath   = it->data(Qt::UserRole).toString();
+            const QString storedById = it->data(Qt::UserRole + 1).toString();
+            const QString addedById  = it->data(Qt::UserRole + 2).toString();
+            const QString fileName   = QFileInfo(filePath).fileName();
 
-        QDialog dlg(window);
-        dlg.setWindowTitle(QString("Queue Item - %1").arg(fileName));
+            QDialog dlg(window);
+            dlg.setWindowTitle(QString("Queue Item - %1").arg(fileName));
 
-        QFormLayout form(&dlg);
-        form.addRow("File path:", new QLabel(filePath));
-        form.addRow("Stored by:",
-                    new QLabel(storedBy.isEmpty() ? "‑" : storedBy));
-        form.addRow("Requested by:",
-                    new QLabel(addedBy.isEmpty() ? "‑" : addedBy));
+            QFormLayout form(&dlg);
 
-        QDialogButtonBox box(QDialogButtonBox::Ok, &dlg);
-        form.addRow(&box);
-        QObject::connect(&box, &QDialogButtonBox::accepted, &dlg,
-                         &QDialog::accept);
+            auto formatPeerInfo = [&](const QString& peerId) -> QString {
+                if (peerId.isEmpty())
+                    return "‑";
+                QString username = roleStore->getPeerUsername(peerId);
+                if (!username.isEmpty()) {
+                    return QString("%1 (%2)").arg(username, peerId);
+                }
+                return peerId;
+            };
 
-        dlg.exec();
-    });
+            QLabel* filePathLabel = new QLabel(filePath, &dlg);
+            filePathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            form.addRow("File path:", filePathLabel);
+
+            QLabel* storedByLabel =
+                new QLabel(formatPeerInfo(storedById), &dlg);
+            storedByLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            form.addRow("Stored by:", storedByLabel);
+
+            QLabel* addedByLabel = new QLabel(formatPeerInfo(addedById), &dlg);
+            addedByLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            form.addRow("Requested by:", addedByLabel);
+
+            QDialogButtonBox box(QDialogButtonBox::Ok, &dlg);
+            form.addRow(&box);
+            QObject::connect(&box, &QDialogButtonBox::accepted, &dlg,
+                             &QDialog::accept);
+
+            dlg.exec();
+        });
 
     queueLayout->addWidget(queueHeaderWidget);
     queueLayout->addWidget(queueList);
@@ -479,14 +499,24 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                 QDialog infoDialog(window);
                 infoDialog.setWindowTitle(QString("Info for %1").arg(username));
                 QFormLayout* form = new QFormLayout(&infoDialog);
-                form->addRow("Username:",
-                             new QLabel(roleStore->getPeerUsername(peerId)));
-                form->addRow("Peer ID:", new QLabel(peerId));
+
+                QLabel* usernameLabel =
+                    new QLabel(roleStore->getPeerUsername(peerId));
+                usernameLabel->setTextInteractionFlags(
+                    Qt::TextSelectableByMouse);
+                form->addRow("Username:", usernameLabel);
+
+                QLabel* peerIdLabel = new QLabel(peerId);
+                peerIdLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                form->addRow("Peer ID:", peerIdLabel);
+
                 QString rolesStr =
                     roleStore->getAssignedRoleNames(peerId).join(", ");
-                form->addRow(
-                    "Roles:",
-                    new QLabel(rolesStr.isEmpty() ? "(none)" : rolesStr));
+                QLabel* rolesLabel =
+                    new QLabel(rolesStr.isEmpty() ? "(none)" : rolesStr);
+                rolesLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                form->addRow("Roles:", rolesLabel);
+
                 QDialogButtonBox* buttonBox =
                     new QDialogButtonBox(QDialogButtonBox::Ok, &infoDialog);
                 form->addRow(buttonBox);
