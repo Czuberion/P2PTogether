@@ -41,6 +41,8 @@ public:
     void setLocalPeerId(const QString& peerId);
     // To be used by GUI components
     QString getLocalPeerId() const;
+    // Gets all known peer IDs from assignments and username cache
+    QVector<QString> getKnownPeerIds() const;
     void storePeerUsername(const QString& peerId, const QString& username);
     QString getPeerUsername(const QString& peerId) const;
     // Gets assigned role names for a peer

@@ -623,9 +623,12 @@ void App::setupUI() {
         qWarning() << "App::setupUI: playPauseBtn not found in leftPanel!";
 
     QWidget* rightPanel =
-        createRightPanel(this, &peer, m_mainWindow, m_worker, m_roleStore);
+        createRightPanel(this, m_mainWindow, m_worker, m_roleStore);
     mainSplitter->addWidget(rightPanel);
     rightPanel->setMinimumWidth(300);
+
+    QTabWidget* rightPanelTabs =
+        rightPanel->findChild<QTabWidget*>("rightPanelTabs");
 
     QList<int> sizes;
     sizes << int(m_mainWindow->width() * 0.65)
@@ -634,7 +637,7 @@ void App::setupUI() {
     mainSplitter->setCollapsible(0, false);
 
     createMenus(m_mainWindow, this, m_roleStore, mainSplitter, rightPanel,
-                leftPanel, m_worker);
+                rightPanelTabs, leftPanel, m_worker);
     m_mainWindow->show();
 }
 

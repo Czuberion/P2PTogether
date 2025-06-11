@@ -4,13 +4,16 @@
 #include "roles/permissions.h"
 #include "transport/control_stream_worker.h"
 
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -18,6 +21,7 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -26,7 +30,7 @@ namespace gui {
 
 std::function<void()> QueueButtonsRefreshCallback;
 
-QWidget* createRightPanel(gui::App* app, P2P::Peer* peer, QMainWindow* window,
+QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                           P2P::ControlStreamWorker* worker,
                           P2P::Roles::RoleStore* roleStore) {
     QWidget* rightPanel = new QWidget();
@@ -36,6 +40,7 @@ QWidget* createRightPanel(gui::App* app, P2P::Peer* peer, QMainWindow* window,
 
     // Create tabs
     QTabWidget* tabs = new QTabWidget();
+    tabs->setObjectName("rightPanelTabs");
 
     // Chat & Queue Tab
     QWidget* chatQueueWidget     = new QWidget();
@@ -425,15 +430,167 @@ QWidget* createRightPanel(gui::App* app, P2P::Peer* peer, QMainWindow* window,
     chatQueueLayout->addWidget(chatQueueSplitter);
 
     // Additional tabs: Peers and Analytics
-    QWidget* peersTab        = new QWidget();
-    QVBoxLayout* peersLayout = new QVBoxLayout(peersTab);
-    peersTab->setLayout(peersLayout);
-    peersLayout->addWidget(new QLabel("Connected Peers:"));
-    QListWidget* peersList = new QListWidget();
-    peersList->addItem("User1 (Viewer)");
-    peersList->addItem("User2 (Streamer)");
-    peersList->addItem("User3 (Viewer)");
-    peersLayout->addWidget(peersList);
+    QWidget* peersTab           = new QWidget();
+    QVBoxLayout* peersTabLayout = new QVBoxLayout(peersTab);
+
+    QTableWidget* peersTable = new QTableWidget();
+    peersTable->setColumnCount(2);
+    peersTable->setHorizontalHeaderLabels({"Username", "Actions"});
+    peersTable->horizontalHeader()->setStretchLastSection(true);
+    peersTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    peersTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    peersTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    peersTable->setColumnWidth(0, 150);
+    peersTabLayout->addWidget(peersTable);
+
+    auto rebuildPeersTable = [peersTable, roleStore, worker, window, app]() {
+        peersTable->clearContents();
+        peersTable->setRowCount(0);
+
+        QVector<QString> peerIds = roleStore->getKnownPeerIds();
+        const QString myId       = roleStore->getLocalPeerId();
+        const quint32 myPerms    = roleStore->getPermissionsForPeer(myId);
+        const bool canManageRoles =
+            P2P::Roles::hasPermission(myPerms, P2P::Roles::PermManageUserRoles);
+        const bool canKick =
+            P2P::Roles::hasPermission(myPerms, P2P::Roles::PermKickUser);
+        const bool canBan =
+            P2P::Roles::hasPermission(myPerms, P2P::Roles::PermBanUser);
+
+        peersTable->setRowCount(peerIds.size());
+        int row = 0;
+        for (const QString& peerId : peerIds) {
+            QString username = roleStore->getPeerUsername(peerId);
+            if (username.isEmpty())
+                username = peerId.left(12) + "...";
+            if (peerId == myId)
+                username += " (You)";
+
+            peersTable->setItem(row, 0, new QTableWidgetItem(username));
+
+            QWidget* actionsWidget     = new QWidget();
+            QHBoxLayout* actionsLayout = new QHBoxLayout(actionsWidget);
+            actionsLayout->setContentsMargins(2, 2, 2, 2);
+            actionsLayout->setSpacing(4);
+
+            QPushButton* infoBtn = new QPushButton("Info");
+            actionsLayout->addWidget(infoBtn);
+            QObject::connect(infoBtn, &QPushButton::clicked, window, [=]() {
+                QDialog infoDialog(window);
+                infoDialog.setWindowTitle(QString("Info for %1").arg(username));
+                QFormLayout* form = new QFormLayout(&infoDialog);
+                form->addRow("Username:",
+                             new QLabel(roleStore->getPeerUsername(peerId)));
+                form->addRow("Peer ID:", new QLabel(peerId));
+                QString rolesStr =
+                    roleStore->getAssignedRoleNames(peerId).join(", ");
+                form->addRow(
+                    "Roles:",
+                    new QLabel(rolesStr.isEmpty() ? "(none)" : rolesStr));
+                QDialogButtonBox* buttonBox =
+                    new QDialogButtonBox(QDialogButtonBox::Ok, &infoDialog);
+                form->addRow(buttonBox);
+                QObject::connect(buttonBox, &QDialogButtonBox::accepted,
+                                 &infoDialog, &QDialog::accept);
+                infoDialog.exec();
+            });
+
+            if (canManageRoles) {
+                QPushButton* rolesBtn = new QPushButton("Roles");
+                actionsLayout->addWidget(rolesBtn);
+
+                QObject::connect(
+                    rolesBtn, &QPushButton::clicked, window, [=]() {
+                        QDialog roleDialog(window);
+                        roleDialog.setWindowTitle(
+                            QString("Set Roles for %1").arg(username));
+                        QVBoxLayout* dLayout = new QVBoxLayout(&roleDialog);
+
+                        QGroupBox* rolesBox =
+                            new QGroupBox("Available Roles", &roleDialog);
+                        QVBoxLayout* rolesLayout = new QVBoxLayout();
+                        rolesBox->setLayout(rolesLayout);
+                        dLayout->addWidget(rolesBox);
+
+                        QMap<QString, QCheckBox*> roleCheckBoxes;
+                        QVector<QString> currentPeerRoles =
+                            roleStore->getAssignedRoleNames(peerId);
+                        for (const auto& roleDef :
+                             roleStore->getRoleDefinitions()) {
+                            QString roleName =
+                                QString::fromStdString(roleDef.name());
+                            QCheckBox* cb = new QCheckBox(roleName);
+                            cb->setChecked(
+                                currentPeerRoles.contains(roleName.toLower()));
+
+                            if (!P2P::Roles::hasPermission(
+                                    myPerms, (P2P::Roles::Permission)
+                                                 roleDef.permissions())) {
+                                cb->setDisabled(true);
+                                cb->setToolTip(
+                                    "You cannot grant this role as it contains "
+                                    "permissions you do not possess.");
+                            }
+                            rolesLayout->addWidget(cb);
+                            roleCheckBoxes[roleName.toLower()] = cb;
+                        }
+
+                        QDialogButtonBox* buttonBox = new QDialogButtonBox(
+                            QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                            &roleDialog);
+                        dLayout->addWidget(buttonBox);
+                        QObject::connect(buttonBox, &QDialogButtonBox::accepted,
+                                         &roleDialog, &QDialog::accept);
+                        QObject::connect(buttonBox, &QDialogButtonBox::rejected,
+                                         &roleDialog, &QDialog::reject);
+
+                        if (roleDialog.exec() == QDialog::Accepted) {
+                            client::ClientMsg msg;
+                            auto* cmd = msg.mutable_set_peer_roles_cmd();
+                            cmd->set_target_peer_id(peerId.toStdString());
+                            for (auto it = roleCheckBoxes.constBegin();
+                                 it != roleCheckBoxes.constEnd(); ++it) {
+                                if (it.value()->isChecked()) {
+                                    cmd->add_assigned_role_names(
+                                        it.key().toStdString());
+                                }
+                            }
+                            worker->send(msg);
+                        }
+                    });
+            }
+
+            if (canKick && peerId != myId) {
+                QPushButton* kickBtn = new QPushButton("Kick");
+                actionsLayout->addWidget(kickBtn);
+                QObject::connect(kickBtn, &QPushButton::clicked, window, [=]() {
+                    QMessageBox::information(
+                        window, "Not Implemented",
+                        "Kicking users is not yet implemented.");
+                });
+            }
+
+            if (canBan && peerId != myId) {
+                QPushButton* banBtn = new QPushButton("Ban");
+                actionsLayout->addWidget(banBtn);
+                QObject::connect(banBtn, &QPushButton::clicked, window, [=]() {
+                    QMessageBox::information(
+                        window, "Not Implemented",
+                        "Banning users is not yet implemented.");
+                });
+            }
+
+            actionsLayout->addStretch();
+            peersTable->setCellWidget(row, 1, actionsWidget);
+            row++;
+        }
+    };
+
+    QObject::connect(roleStore, &P2P::Roles::RoleStore::allAssignmentsRefreshed,
+                     peersTable, rebuildPeersTable);
+    QObject::connect(roleStore, &P2P::Roles::RoleStore::peerRolesChanged,
+                     peersTable, rebuildPeersTable);
+    rebuildPeersTable();
 
     QWidget* analyticsTab        = new QWidget();
     QVBoxLayout* analyticsLayout = new QVBoxLayout(analyticsTab);

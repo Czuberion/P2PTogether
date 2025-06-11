@@ -5,8 +5,10 @@
 #include "p2p/session.pb.h"
 #include "roles/permissions.h"
 #include "transport/control_stream_worker.h"
+
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDebug>
@@ -15,7 +17,9 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenuBar>
@@ -70,6 +74,171 @@ static void showSessionInfoDialogHelper(
                      &QDialog::accept);
     layout->addWidget(buttonBox);
     infoDialog.exec();
+}
+
+static void openManageRoleDefinitionsDialog(QMainWindow* window,
+                                            P2P::Roles::RoleStore* roleStore,
+                                            P2P::ControlStreamWorker* worker) {
+    QDialog manageDialog(window);
+    manageDialog.setWindowTitle("Manage Role Definitions");
+    QVBoxLayout* layout = new QVBoxLayout(&manageDialog);
+
+    QTableWidget* rolesTable = new QTableWidget();
+    rolesTable->setColumnCount(2);
+    rolesTable->setHorizontalHeaderLabels({"Role Name", "Permissions"});
+    rolesTable->horizontalHeader()->setStretchLastSection(true);
+    rolesTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    rolesTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    rolesTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    layout->addWidget(rolesTable);
+
+    QHBoxLayout* buttonLayout = new QHBoxLayout();
+    QPushButton* addButton    = new QPushButton("Add...");
+    QPushButton* editButton   = new QPushButton("Edit...");
+    QPushButton* removeButton = new QPushButton("Remove");
+    buttonLayout->addWidget(addButton);
+    buttonLayout->addWidget(editButton);
+    buttonLayout->addWidget(removeButton);
+    layout->addLayout(buttonLayout);
+
+    const quint32 myPerms =
+        roleStore->getPermissionsForPeer(roleStore->getLocalPeerId());
+
+    const auto permissionMap = P2P::Roles::getPermissionDescriptions();
+
+    auto openRoleEditor = [&](const client::p2p::RoleDefinition* existingRole =
+                                  nullptr) {
+        QDialog editor(&manageDialog);
+        editor.setWindowTitle(existingRole ? "Edit Role" : "Add Role");
+        QFormLayout* form = new QFormLayout(&editor);
+
+        QLineEdit* nameInput = new QLineEdit(
+            existingRole ? QString::fromStdString(existingRole->name()) : "");
+        form->addRow("Role Name:", nameInput);
+
+        QGroupBox* permsBox      = new QGroupBox("Permissions", &editor);
+        QGridLayout* permsLayout = new QGridLayout();
+        permsBox->setLayout(permsLayout);
+
+        QMap<P2P::Roles::Permission, QCheckBox*> checkBoxes;
+        int row = 0, col = 0;
+        for (auto it = permissionMap.constBegin();
+             it != permissionMap.constEnd(); ++it) {
+            QCheckBox* cb = new QCheckBox(it.value());
+            if (existingRole && P2P::Roles::hasPermission(
+                                    existingRole->permissions(), it.key())) {
+                cb->setChecked(true);
+            }
+            // User can only grant permissions they themselves possess.
+            if (!P2P::Roles::hasPermission(myPerms, it.key())) {
+                cb->setDisabled(true);
+                cb->setToolTip(
+                    "You do not have this permission, so you cannot grant it.");
+            }
+            checkBoxes[it.key()] = cb;
+            permsLayout->addWidget(cb, row, col);
+            if (++col % 2 == 0) {
+                row++;
+                col = 0;
+            }
+        }
+        form->addRow(permsBox);
+
+        QDialogButtonBox* buttonBox = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &editor);
+        form->addRow(buttonBox);
+
+        QObject::connect(buttonBox, &QDialogButtonBox::accepted, &editor,
+                         &QDialog::accept);
+        QObject::connect(buttonBox, &QDialogButtonBox::rejected, &editor,
+                         &QDialog::reject);
+
+        if (editor.exec() == QDialog::Accepted &&
+            !nameInput->text().isEmpty()) {
+            quint32 perms = 0;
+            for (auto it = checkBoxes.constBegin(); it != checkBoxes.constEnd();
+                 ++it) {
+                if (it.value()->isChecked()) {
+                    perms |= it.key();
+                }
+            }
+            client::ClientMsg msg;
+            auto* cmd = msg.mutable_update_role_cmd();
+            cmd->mutable_definition()->set_name(
+                nameInput->text().toStdString());
+            cmd->mutable_definition()->set_permissions(perms);
+            cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+            worker->send(msg);
+        }
+    };
+
+    auto populateTable = [&]() {
+        rolesTable->clearContents();
+        QMap<QString, client::p2p::RoleDefinition> defs =
+            roleStore->getRoleDefinitions();
+        rolesTable->setRowCount(defs.size());
+        int row = 0;
+        for (const auto& def : defs) {
+            QString permsStr;
+            for (auto it = permissionMap.constBegin();
+                 it != permissionMap.constEnd(); ++it) {
+                if (P2P::Roles::hasPermission(def.permissions(), it.key())) {
+                    if (!permsStr.isEmpty())
+                        permsStr += ", ";
+                    permsStr += it.value();
+                }
+            }
+            rolesTable->setItem(
+                row, 0,
+                new QTableWidgetItem(QString::fromStdString(def.name())));
+            rolesTable->setItem(row, 1, new QTableWidgetItem(permsStr));
+            rolesTable->item(row, 0)->setData(Qt::UserRole,
+                                              QVariant::fromValue(def));
+            row++;
+        }
+    };
+
+    populateTable();
+    QObject::connect(roleStore, &P2P::Roles::RoleStore::definitionsChanged,
+                     &manageDialog, populateTable);
+
+    QObject::connect(addButton, &QPushButton::clicked, &manageDialog,
+                     [&]() { openRoleEditor(); });
+
+    QObject::connect(editButton, &QPushButton::clicked, &manageDialog, [&]() {
+        if (rolesTable->currentRow() < 0)
+            return;
+        QTableWidgetItem* item = rolesTable->item(rolesTable->currentRow(), 0);
+        client::p2p::RoleDefinition existingRole =
+            item->data(Qt::UserRole).value<client::p2p::RoleDefinition>();
+        openRoleEditor(&existingRole);
+    });
+
+    QObject::connect(removeButton, &QPushButton::clicked, &manageDialog, [&]() {
+        if (rolesTable->currentRow() < 0)
+            return;
+        QTableWidgetItem* item = rolesTable->item(rolesTable->currentRow(), 0);
+        QString roleName       = item->text();
+        if (QMessageBox::question(
+                &manageDialog, "Confirm Removal",
+                QString("Are you sure you want to remove the role '%1'?")
+                    .arg(roleName),
+                QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+            client::ClientMsg msg;
+            auto* cmd = msg.mutable_remove_role_cmd();
+            cmd->set_role_name(roleName.toStdString());
+            cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+            worker->send(msg);
+        }
+    });
+
+    QDialogButtonBox* closeButton =
+        new QDialogButtonBox(QDialogButtonBox::Close);
+    layout->addWidget(closeButton);
+    QObject::connect(closeButton, &QDialogButtonBox::rejected, &manageDialog,
+                     &QDialog::reject);
+
+    manageDialog.exec();
 }
 
 // Helper function to rebuild the roles submenu
@@ -186,16 +355,17 @@ static void rebuildRolesMenu(QMenu* rolesMenu, P2P::Roles::RoleStore* roleStore,
         P2P::Roles::hasPermission(
             roleStore->getPermissionsForPeer(myPeerIdQString),
             P2P::Roles::PermAddRemoveRoles);
+
     manageDefinitionsAction->setEnabled(canManageDefs);
-    // TODO: Connect manageDefinitionsAction to a dialog
-    // TODO: Update manageDefinitionsAction->setEnabled state when local peer's
-    // permissions change
+    QObject::connect(
+        manageDefinitionsAction, &QAction::triggered, window,
+        [=]() { openManageRoleDefinitionsDialog(window, roleStore, worker); });
 }
 
 void createMenus(QMainWindow* window, gui::App* app,
                  P2P::Roles::RoleStore* roleStore, QSplitter* mainSplitter,
-                 QWidget* rightPanel, QWidget* leftPanel,
-                 P2P::ControlStreamWorker* worker) {
+                 QWidget* rightPanel, QTabWidget* rightPanelTabs,
+                 QWidget* leftPanel, P2P::ControlStreamWorker* worker) {
     QMenuBar* menuBar = window->menuBar();
 
     // Session menu
@@ -491,52 +661,39 @@ void createMenus(QMainWindow* window, gui::App* app,
 
     // Peers menu
     QMenu* peersMenu           = menuBar->addMenu("Peers");
-    QAction* managePeersAction = peersMenu->addAction("Manage Peers");
-    QObject::connect(managePeersAction, &QAction::triggered, [window]() {
-        QDialog peersDialog(window);
-        peersDialog.setWindowTitle("Manage Peers");
-        QVBoxLayout* dialogLayout = new QVBoxLayout(&peersDialog);
-        QTableWidget* peersList   = new QTableWidget(3, 3);
-        QStringList headers       = {"Username", "Role", "Actions"};
-        peersList->setHorizontalHeaderLabels(headers);
-        peersList->setItem(0, 0, new QTableWidgetItem("User1"));
-        peersList->setItem(0, 1, new QTableWidgetItem("Viewer"));
-        peersList->setItem(1, 0, new QTableWidgetItem("User2"));
-        peersList->setItem(1, 1, new QTableWidgetItem("Streamer"));
-        peersList->setItem(2, 0, new QTableWidgetItem("User3"));
-        peersList->setItem(2, 1, new QTableWidgetItem("Viewer"));
-        peersList->setColumnWidth(0, 150);
-        peersList->setColumnWidth(1, 100);
-        peersList->setColumnWidth(2, 100);
-        dialogLayout->addWidget(peersList);
-        QHBoxLayout* buttonLayout = new QHBoxLayout();
-        QPushButton* closeButton  = new QPushButton("Close");
-        QObject::connect(closeButton, &QPushButton::clicked, &peersDialog,
-                         &QDialog::close);
-        buttonLayout->addStretch();
-        buttonLayout->addWidget(closeButton);
-        buttonLayout->addStretch();
-        dialogLayout->addLayout(buttonLayout);
-        peersDialog.resize(400, 300);
-        peersDialog.exec();
-    });
+    QAction* managePeersAction = peersMenu->addAction("Show Peers Panel");
+    QObject::connect(managePeersAction, &QAction::triggered,
+                     [window, rightPanel, mainSplitter, rightPanelTabs]() {
+                         if (rightPanel && !rightPanel->isVisible()) {
+                             rightPanel->show();
+                             QList<int> sizes;
+                             sizes << int(window->width() * 0.65)
+                                   << int(window->width() * 0.35);
+                             mainSplitter->setSizes(sizes);
+                         }
+                         if (rightPanelTabs) {
+                             for (int i = 0; i < rightPanelTabs->count(); ++i) {
+                                 if (rightPanelTabs->tabText(i) == "Peers") {
+                                     rightPanelTabs->setCurrentIndex(i);
+                                     break;
+                                 }
+                             }
+                         }
+                     });
 
     // View menu
     QMenu* viewMenu              = menuBar->addMenu("View");
     QAction* toggleSidebarAction = viewMenu->addAction("Toggle Sidebar");
-    // Use a static variable to persist the sidebar state across invocations
-    static bool sidebarVisible = true;
-    SidebarToggleCallback      = [window, mainSplitter, rightPanel]() mutable {
-        sidebarVisible = !sidebarVisible;
-        if (sidebarVisible) {
-            rightPanel->show();
-            QList<int> sizes;
-            sizes << int(window->width() * 0.65) << int(window->width() * 0.35);
-            mainSplitter->setSizes(sizes);
-        } else {
+    SidebarToggleCallback        = [window, mainSplitter, rightPanel]() {
+        if (rightPanel->isVisible()) {
             rightPanel->hide();
             QList<int> sizes;
             sizes << window->width() << 0;
+            mainSplitter->setSizes(sizes);
+        } else {
+            rightPanel->show();
+            QList<int> sizes;
+            sizes << int(window->width() * 0.65) << int(window->width() * 0.35);
             mainSplitter->setSizes(sizes);
         }
     };
@@ -610,7 +767,7 @@ void createMenus(QMainWindow* window, gui::App* app,
     QObject::connect(aboutAction, &QAction::triggered, [window]() {
         QMessageBox::information(
             window, "About",
-            "P2PTogether v0.1\n\nA synchronized viewing platform prototype");
+            "P2PTogether v0.1\n\nA synchronized video watching platform");
     });
 }
 

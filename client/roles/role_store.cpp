@@ -234,6 +234,20 @@ QString RoleStore::getLocalPeerId() const {
     return localPeerId;
 }
 
+QVector<QString> RoleStore::getKnownPeerIds() const {
+    QReadLocker locker(&storeLock);
+    QSet<QString> ids;
+    for (auto it = peerAssignments.constBegin();
+         it != peerAssignments.constEnd(); ++it) {
+        ids.insert(it.key());
+    }
+    for (auto it = peerUsernames.constBegin(); it != peerUsernames.constEnd();
+         ++it) {
+        ids.insert(it.key());
+    }
+    return QVector<QString>::fromList(ids.values().toVector());
+}
+
 void RoleStore::storePeerUsername(const QString& peerId,
                                   const QString& username) {
     if (peerId.isEmpty())

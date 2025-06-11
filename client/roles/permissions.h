@@ -34,6 +34,25 @@ enum Permission : quint32 {
     PermAll = (1 << 13) - 1
 };
 
+inline const QMap<Permission, QString> getPermissionDescriptions() {
+    static const QMap<Permission, QString> permissionMap = {
+        {PermView, "View Stream"},
+        {PermChat, "Chat"},
+        {PermKickUser, "Kick Users"},
+        {PermBanUser, "Ban Users"},
+        {PermModerateChat, "Moderate Chat"},
+        {PermAddRemoveRoles, "Manage Roles"},
+        {PermManageUserRoles, "Manage User Roles"},
+        {PermInvite, "Invite Users"},
+        {PermStream, "Stream Content"},
+        {PermPlayPause, "Play/Pause"},
+        {PermSeek, "Seek"},
+        {PermSetSpeed, "Set Speed"},
+        {PermQueue, "Manage Queue"},
+    };
+    return permissionMap;
+}
+
 // Helper to check if a set of permissions includes a required permission
 inline bool hasPermission(quint32 currentPermissions,
                           Permission requiredPermission) {

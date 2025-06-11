@@ -30,14 +30,15 @@ namespace gui {
  *
  * \param window Pointer to the main QMainWindow.
  * \param peer Pointer to the P2P::Peer object representing the local user.
- * \param mainSplitter Pointer to the main QSplitter for layout management.
+ * \param mainSplitter Pointer to the main QSplitter for sidebar toggling.
  * \param rightPanel Pointer to the right panel widget (chat, queue, analytics).
+ * \param rightPanelTabs Pointer to the QTabWidget in the right panel.
  * \param leftPanel Pointer to the left panel widget (video playback).
  */
 void createMenus(QMainWindow* window, gui::App* app,
                  P2P::Roles::RoleStore* roleStore, QSplitter* mainSplitter,
-                 QWidget* rightPanel, QWidget* leftPanel,
-                 P2P::ControlStreamWorker* worker);
+                 QWidget* rightPanel, QTabWidget* rightPanelTabs,
+                 QWidget* leftPanel, P2P::ControlStreamWorker* worker);
 
 /*!
  * \brief Callback function for toggling the sidebar visibility.
