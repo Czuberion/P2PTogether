@@ -34,6 +34,7 @@ Q_SIGNALS:
     void durationChanged(double value);
     void positionChanged(double value);
     void actualFileEnded();
+    void fileLoaded();
 
 protected:
     void initializeGL() Q_DECL_OVERRIDE;

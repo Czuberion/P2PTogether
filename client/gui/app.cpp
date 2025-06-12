@@ -232,31 +232,21 @@ void App::onServerMessage(const client::ServerMsg& msg) {
             disconnect(m_seekOnLoadConnection);
         }
 
-        // Connect a single-shot lambda to MpvManager::playlistReady
-        // This lambda will execute the seek *after* MpvManager confirms the HLS
-        // is ready and after video_panel's slot has presumably commanded mpv to
-        // 'loadfile'.
+        // The video_panel is already connected to MpvManager::playlistReady to
+        // do the 'loadfile'. We connect to the MpvWidget's fileLoaded signal,
+        // which is emitted AFTER mpv confirms the file is actually loaded,
+        // making it safe to seek.
         m_seekOnLoadConnection = connect(
-            m_mpvManager, &player::MpvManager::playlistReady, this,
-            [this,
-             startPts = resetCmd.start_pts()](const QString& /*loadedUrl*/) {
+            m_mpvWidget, &player::MpvWidget::fileLoaded, this,
+            [this, startPts = resetCmd.start_pts()]() {
                 qInfo() << "App::onServerMessage (Deferred Seek via "
-                           "MpvManager::playlistReady): mpv 'seek absolute "
-                           "exact' for pos:"
+                           "MpvWidget::fileLoaded): "
+                           "mpv 'seek absolute exact' for pos:"
                         << startPts;
                 if (m_mpvWidget) {
-                    // Use QTimer::singleShot with 0ms timeout to defer the seek
-                    // command slightly. This gives mpv a chance to process the
-                    // 'loadfile' command from video_panel's slot before we try
-                    // to seek.
-                    QTimer::singleShot(0, this, [this, startPts]() {
-                        qInfo() << "App::onServerMessage (Deferred Seek - "
-                                   "QTimer): Executing mpv seek to"
-                                << startPts;
-                        m_mpvWidget->command(
-                            QStringList() << "seek" << QString::number(startPts)
-                                          << "absolute" << "exact");
-                    });
+                    m_mpvWidget->command(QStringList()
+                                         << "seek" << QString::number(startPts)
+                                         << "absolute" << "exact");
                 }
                 // QMetaObject::Connection is automatically disconnected by
                 // Qt::SingleShotConnection after firing but we clear our handle

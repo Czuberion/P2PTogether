@@ -140,6 +140,11 @@ void MpvWidget::handle_mpv_event(mpv_event* event) {
         Q_EMIT actualFileEnded();
         break;
     }
+    case MPV_EVENT_FILE_LOADED: {
+        qInfo() << "MpvWidget: MPV_EVENT_FILE_LOADED received!";
+        Q_EMIT fileLoaded();
+        break;
+    }
     default:;
         // Ignore uninteresting or unknown events.
     }
