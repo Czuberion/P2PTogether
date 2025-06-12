@@ -340,39 +340,77 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     // --- Button Enable/Disable Logic ---
     // This lambda will be connected to App's queueStateChanged and RoleStore
     // signals
-    auto updateSkipButtonStates = [app, skipBackBtn, skipForwardBtn, worker]() {
-        if (!app || !skipBackBtn || !skipForwardBtn)
+    auto updateButtonStates = [app, skipBackBtn, skipForwardBtn, rewindBtn,
+                               playPauseBtn, fastForwardBtn, stopButton,
+                               replayBtn, screenshotBtn]() {
+        if (!app)
             return;
 
-        bool canQueue = false;
-        // Attempt to get RoleStore. This assumes RoleStore is a child of App or
-        // accessible via App. A more direct way (e.g., app->getRoleStore())
-        // would be cleaner if App provides it.
+        // Default to disabled if RoleStore is unavailable
+        bool canQueue     = false;
+        bool canPlayPause = false;
+        bool canSeek      = false;
+
         P2P::Roles::RoleStore* roleStore =
             app->findChild<P2P::Roles::RoleStore*>();
         if (roleStore) {
-            canQueue = P2P::Roles::hasPermission(
-                roleStore->getPermissionsForPeer(roleStore->getLocalPeerId()),
-                P2P::Roles::PermQueue);
+            quint32 perms =
+                roleStore->getPermissionsForPeer(roleStore->getLocalPeerId());
+            canQueue = P2P::Roles::hasPermission(perms, P2P::Roles::PermQueue);
+            canPlayPause =
+                P2P::Roles::hasPermission(perms, P2P::Roles::PermPlayPause);
+            canSeek = P2P::Roles::hasPermission(perms, P2P::Roles::PermSeek);
         }
 
+        // Update queue-related buttons (skip)
         QList<client::p2p::QueueItem> items = app->getCurrentQueueItems();
         int currentIndex                    = app->getCurrentPlayingIndex();
         int queueSize                       = items.size();
+        bool hasVideo                       = queueSize > 0;
 
-        skipBackBtn->setEnabled(canQueue && currentIndex > 0 && queueSize > 0);
+        // Set visibility based on permissions
+        skipBackBtn->setVisible(canQueue);
+        skipForwardBtn->setVisible(canQueue);
+        playPauseBtn->setVisible(canPlayPause);
+        rewindBtn->setVisible(canSeek);
+        fastForwardBtn->setVisible(canSeek);
+        replayBtn->setVisible(canSeek);
+        stopButton->setVisible(canPlayPause && canSeek);
+
+        // Enable/disable buttons based on queue/video state and permissions
+        skipBackBtn->setEnabled(canQueue && currentIndex > 0 && hasVideo);
         skipForwardBtn->setEnabled(canQueue && currentIndex >= 0 &&
-                                   currentIndex < queueSize - 1 &&
-                                   queueSize > 0);
+                                   currentIndex < queueSize - 1 && hasVideo);
+        playPauseBtn->setEnabled(canPlayPause && hasVideo);
+        rewindBtn->setEnabled(canSeek && hasVideo);
+        fastForwardBtn->setEnabled(canSeek && hasVideo);
+        replayBtn->setEnabled(canSeek && hasVideo);
+        stopButton->setEnabled(canPlayPause && canSeek && hasVideo);
+        screenshotBtn->setEnabled(hasVideo);
     };
 
     // Connect to App's signal for queue/playback index changes
     QObject::connect(app, &gui::App::queueStateChanged, videoPanel,
-                     updateSkipButtonStates);
-    // TODO: Also connect to RoleStore's signals (e.g., peerRolesChanged,
-    // localPeerIdConfirmed)
-    //       if RoleStore is accessible, or have App consolidate these signals.
-    updateSkipButtonStates(); // Call once for initial state
+                     updateButtonStates);
+    // Connect to RoleStore signals for permission changes
+    P2P::Roles::RoleStore* roleStore = app->findChild<P2P::Roles::RoleStore*>();
+    if (roleStore) {
+        QObject::connect(
+            roleStore, &P2P::Roles::RoleStore::peerRolesChanged, videoPanel,
+            [app, roleStore, updateButtonStates](const QString& peerId) {
+                if (app && roleStore && peerId == roleStore->getLocalPeerId())
+                    updateButtonStates();
+            });
+        QObject::connect(roleStore, &P2P::Roles::RoleStore::definitionsChanged,
+                         videoPanel, updateButtonStates);
+        QObject::connect(roleStore,
+                         &P2P::Roles::RoleStore::allAssignmentsRefreshed,
+                         videoPanel, updateButtonStates);
+        QObject::connect(roleStore,
+                         &P2P::Roles::RoleStore::localPeerIdConfirmed,
+                         videoPanel, updateButtonStates);
+    }
+    updateButtonStates(); // Call once for initial state
 
     return videoPanel;
 }
