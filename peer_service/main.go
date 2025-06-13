@@ -805,7 +805,7 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			continue
 
 		case *clientpb.ClientMsg_QueueCmd:
-			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, senderID, s.roleManager, s.hub, s.node, s.ctrlTopic); err != nil {
+			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, senderID, s.roleManager, s.hub, s.node, s.node.CtrlTopic()); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", nodeIDStr, err)
 			}
 
@@ -880,14 +880,15 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 // Helper to publish any ServerMsg payload to the control topic
 func (s *server) publishToControlTopic(ctx context.Context, msg *clientpb.ServerMsg) error {
-	if s.ctrlTopic == nil {
+	ctrlTopic := s.node.CtrlTopic()
+	if ctrlTopic == nil {
 		return fmt.Errorf("control topic is nil, cannot publish")
 	}
 	marshalledMsg, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal ServerMsg for broadcast: %w", err)
 	}
-	if err := s.ctrlTopic.Publish(ctx, marshalledMsg); err != nil {
+	if err := ctrlTopic.Publish(ctx, marshalledMsg); err != nil {
 		return fmt.Errorf("failed to publish ServerMsg to ctrlTopic: %w", err)
 	}
 	return nil
@@ -907,7 +908,7 @@ func (s *server) publishToChatTopic(ctx context.Context, msg *clientpb.ServerMsg
 	if err != nil {
 		return fmt.Errorf("failed to marshal ServerMsg (ChatMsg) for chat broadcast: %w", err)
 	}
-	if err := s.chatTopic.Publish(ctx, marshalledMsg); err != nil {
+	if err := chatTopic.Publish(ctx, marshalledMsg); err != nil {
 		return fmt.Errorf("failed to publish ServerMsg (ChatMsg) to chatTopic: %w", err)
 	}
 	return nil
