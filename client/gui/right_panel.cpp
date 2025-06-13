@@ -543,15 +543,18 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                         dLayout->addWidget(rolesBox);
 
                         QMap<QString, QCheckBox*> roleCheckBoxes;
-                        QVector<QString> currentPeerRoles =
+                        QVector<QString> currentPeerRolesRaw =
                             roleStore->getAssignedRoleNames(peerId);
+                        QVector<QString> currentPeerRolesLower;
+                        for (const auto& r : currentPeerRolesRaw)
+                            currentPeerRolesLower.append(r.toLower());
                         for (const auto& roleDef :
                              roleStore->getRoleDefinitions()) {
                             QString roleName =
                                 QString::fromStdString(roleDef.name());
                             QCheckBox* cb = new QCheckBox(roleName);
-                            cb->setChecked(
-                                currentPeerRoles.contains(roleName.toLower()));
+                            cb->setChecked(currentPeerRolesLower.contains(
+                                roleName.toLower()));
 
                             if (!P2P::Roles::hasPermission(
                                     myPerms, (P2P::Roles::Permission)

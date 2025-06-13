@@ -170,9 +170,21 @@ QVector<QString> RoleStore::getAssignedRoleNames(const QString& peerId) const {
         const auto& assignmentProto = it.value();
         QVector<QString> names;
         names.reserve(assignmentProto.assigned_role_names_size());
-        for (const std::string& roleNameStd :
+        for (const std::string& roleNameKeyStd :
              assignmentProto.assigned_role_names()) {
-            names.append(QString::fromStdString(roleNameStd));
+            // The received role name is a lowercase key. Look up the canonical
+            // name.
+            const QString key =
+                QString::fromStdString(roleNameKeyStd).toLower();
+            if (roleDefinitions.contains(key)) {
+                // Get the canonical, cased name from the definition
+                names.append(
+                    QString::fromStdString(roleDefinitions.value(key).name()));
+            } else {
+                // Fallback to the raw key if definition not found (shouldn't
+                // happen)
+                names.append(key);
+            }
         }
         return names;
     }
