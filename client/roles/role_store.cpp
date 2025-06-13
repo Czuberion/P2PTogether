@@ -252,12 +252,20 @@ void RoleStore::storePeerUsername(const QString& peerId,
                                   const QString& username) {
     if (peerId.isEmpty())
         return;
-    QWriteLocker locker(&storeLock);
-    if (!username.isEmpty()) {
-        peerUsernames[peerId] = username;
-    } else {
-        peerUsernames.remove(peerId); // Remove if username is empty (e.g., peer
-                                      // left or never had one)
+    bool changed = false;
+    {
+        QWriteLocker locker(&storeLock);
+        if (peerUsernames.value(peerId) != username) {
+            if (!username.isEmpty()) {
+                peerUsernames[peerId] = username;
+            } else {
+                peerUsernames.remove(peerId);
+            }
+            changed = true;
+        }
+    }
+    if (changed) {
+        emit allAssignmentsRefreshed();
     }
 }
 

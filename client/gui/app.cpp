@@ -115,10 +115,16 @@ void App::onServerMessage(const client::ServerMsg& msg) {
         break;
     }
     case client::ServerMsg::kLocalPeerIdentity: {
-        m_roleStore->setLocalPeerId(
-            QString::fromStdString(msg.local_peer_identity().peer_id()));
         QString receivedPeerId =
             QString::fromStdString(msg.local_peer_identity().peer_id());
+
+        // The first LocalPeerIdentity message received on stream connection
+        // identifies the local peer. Subsequent ones are for other peers
+        // joining the session. Only set the local ID if it's not already set.
+        if (m_roleStore->getLocalPeerId().isEmpty()) {
+            m_roleStore->setLocalPeerId(receivedPeerId);
+        }
+
         qInfo() << "GUI: Received LocalPeerIdentity for peer:"
                 << receivedPeerId;
 
