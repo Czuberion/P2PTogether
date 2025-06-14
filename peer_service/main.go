@@ -1367,6 +1367,8 @@ func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, 
 			handleGossipPeerRoleAssignment(payload.PeerRoleAssignment, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_AllPeerRoleAssignments:
 			handleGossipAllPeerRoleAssignments(payload.AllPeerRoleAssignments, msg.ReceivedFrom, srv)
+		case *clientpb.ServerMsg_PlaylistReset:
+			handleGossipPlaylistReset(payload.PlaylistReset, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_PlaybackStateCmd:
 			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_LocalPeerIdentity:
@@ -1479,10 +1481,20 @@ func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, 
 	}
 }
 
+// handleGossipPlaylistReset resets the local RingBuffer and HLS state in response to a remote command.
+func handleGossipPlaylistReset(cmd *p2ppb.PlaylistReset, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipPlaylistReset: received from %s (Seq: %d, HLC: %d)", from, cmd.Sequence, cmd.HlcTs)
+	// Reset the local RingBuffer to the new base sequence. This purges old segments.
+	if rb := srv.node.RingBuffer(); rb != nil {
+		rb.Reset(cmd.Sequence)
+	}
+	// Trigger a discontinuity in the local HLS server.
+	srv.triggerHLSDircontinuity()
+	// Forward the message to the local GUI client.
+	srv.hub.Broadcast(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PlaylistReset{PlaylistReset: cmd}})
+}
+
 // handleGossipPlaybackStateCmd forwards a SetPlaybackStateCmd received via GossipSub to the local GUI via the Hub.
-//
-//	func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, hub *p2p.Hub) {
-//		log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d) from %s. Broadcasting to local hub.", cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, from)
 func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, srv *server) {
 	log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d StreamSeq: %d) from %s.",
 		cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, cmd.StreamSequenceId, from)

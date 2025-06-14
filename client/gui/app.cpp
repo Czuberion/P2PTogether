@@ -310,6 +310,25 @@ void App::onServerMessage(const client::ServerMsg& msg) {
         for (const auto& item : msg.queue_update().items()) {
             m_currentQueueItems.append(item);
         }
+
+        // After a queue update, the item corresponding to the active
+        // stream sequence might now be present with its first_seq set.
+        // Re-evaluate the playing index to handle out-of-order messages
+        // where PlaylistReset arrived before this QueueUpdate.
+        m_currentPlayingIndex = -1;
+        for (int i = 0; i < m_currentQueueItems.size(); ++i) {
+            const auto& item = m_currentQueueItems.at(i);
+            if (item.first_seq() == m_activePlaylistSequenceId) {
+                m_currentPlayingIndex = i;
+                break;
+            }
+        }
+        if (m_currentPlayingIndex == -1 && m_currentQueueItems.size() == 1 &&
+            m_activePlaylistSequenceId == 0) {
+            // Special case for the very first item (seq 0) in the session
+            m_currentPlayingIndex = 0;
+        }
+
         // Note: currentPlayingIndex might become stale if items are
         // removed/reordered until the next PlaylistReset. For skip buttons,
         // this is usually fine.
