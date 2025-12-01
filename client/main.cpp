@@ -35,6 +35,9 @@ int main(int argc, char* argv[]) {
     QString binDir =
         appInfo.absolutePath(); // Directory containing the executable
     QString peerServicePath = binDir + QDir::separator() + "peer_service";
+#ifdef Q_OS_WIN
+    peerServicePath += ".exe";
+#endif
 
     // ---  pick an unused localhost port for gRPC  ---
     quint16 grpcPort = 0;

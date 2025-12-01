@@ -8,8 +8,73 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(CTest)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets Network)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
+find_package(Protobuf REQUIRED)
+find_package(gRPC REQUIRED)
+find_package(Doxygen QUIET)
+
+# --- Find MPV in a cross-platform way ----------------------------------------
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PC_MPV QUIET mpv)
+endif()
+
+find_path(MPV_INCLUDE_DIR mpv/client.h
+          HINTS ${PC_MPV_INCLUDE_DIRS} ENV MPV_DIR
+          PATH_SUFFIXES include)
+
+find_library(MPV_LIBRARY NAMES mpv-2 mpv libmpv
+             HINTS ${PC_MPV_LIBRARY_DIRS} ENV MPV_DIR
+             PATH_SUFFIXES lib lib64)
+
+find_library(MPV_IMPORT_LIBRARY NAMES mpv-2 mpv libmpv
+             HINTS ${PC_MPV_LIBRARY_DIRS} ENV MPV_DIR
+             PATH_SUFFIXES lib lib64)
+
+if (MPV_INCLUDE_DIR AND MPV_IMPORT_LIBRARY)
+    message(STATUS "Found mpv import lib: ${MPV_IMPORT_LIBRARY}")
+
+    # locate the actual runtime DLL (same folder or ../bin)
+    get_filename_component(_mpv_dir "${MPV_IMPORT_LIBRARY}" DIRECTORY)
+    find_file(MPV_RUNTIME_DLL
+              NAMES libmpv-2.dll libmpv.dll mpv-2.dll
+              HINTS "${_mpv_dir}" "${_mpv_dir}/../bin" ENV MPV_DIR
+              PATH_SUFFIXES bin
+              NO_DEFAULT_PATH)
+    if (NOT MPV_RUNTIME_DLL)
+        message(FATAL_ERROR
+            "Found mpv import lib at ${MPV_IMPORT_LIBRARY} but no runtime DLL.")
+    endif()
+
+    # create the imported target
+    add_library(MPV::mpv SHARED IMPORTED)
+    set_target_properties(MPV::mpv PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${MPV_INCLUDE_DIR}"
+        IMPORTED_IMPLIB               "${MPV_IMPORT_LIBRARY}"
+        IMPORTED_LOCATION             "${MPV_RUNTIME_DLL}")
+
+    # # On Windows the linker also needs the import library (*.lib / *.dll.a)
+    # if (WIN32)
+    #     get_filename_component(_mpv_dir "${MPV_LIBRARY}" DIRECTORY)
+    #     foreach(_cand
+    #             "${_mpv_dir}/libmpv.dll.a"   # MinGW / clang (GNU mode)
+    #             "${_mpv_dir}/mpv.lib")       # MSVC / clang-cl
+    #         if (EXISTS "${_cand}")
+    #             set_target_properties(MPV::mpv PROPERTIES
+    #                 IMPORTED_IMPLIB "${_cand}")
+    #             break()
+    #         endif ()
+    #     endforeach()
+    # endif ()
+else()
+    message(FATAL_ERROR
+        "Could not find libmpv. Please install it, or set MPV_DIR to the "
+        "folder that contains include/mpv/client.h and the mpv DLL/LIB.")
+endif()
+
+# --- Windows-specific Protobuf/Clang Hotfix ---
+if(WIN32)
+    add_compile_definitions(_DISABLE_CONSTINIT_INITIALIZERS)
+endif()
 
 # Set all binary outputs to build/bin
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -80,68 +145,130 @@ add_executable(P2PTogether ${SOURCES} ${HEADERS})
 # Include directories
 target_include_directories(P2PTogether PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/client
-    ${MPV_INCLUDE_DIRS}       # Add mpv include directory
     ${CPP_CLIENT_PROTO_OUT_DIR}
-    ${Protobuf_INCLUDE_DIRS}
-    ${gRPC_INCLUDE_DIRS}
 )
-
-# Link libraries
-find_package(Protobuf REQUIRED)
-find_package(gRPC REQUIRED)
-
-if(NOT gRPC_FOUND)
-  message(FATAL_ERROR "gRPC not found!")
-endif()
-if(NOT Protobuf_FOUND)
-  message(FATAL_ERROR "Protobuf not found!")
-endif()
 
 target_link_libraries(P2PTogether PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::OpenGLWidgets
     Qt6::Network
-    PkgConfig::MPV
+    MPV::mpv
     gRPC::grpc++
-    protobuf # Link protobuf directly by name
 )
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Post-build deploy step (only runs on Windows)
+#     - copies all Qt runtime files with windeployqt
+#     - drops the exact libmpv-2.dll we linked against next to the EXE
+# ──────────────────────────────────────────────────────────────────────────────
+if (WIN32)
+
+    #
+    # --- 1. Locate windeployqt ------------------------------------------------
+    #
+    # Qt’s own CMake config lives two folders deeper than the tool:
+    #   Qt6_DIR  =  …/Qt/6.x.x/msvc2022_64/lib/cmake/Qt6
+    #   windeployqt.exe  →  …/Qt/6.x.x/msvc2022_64/bin
+    #
+    get_filename_component(_qt_prefix "${Qt6_DIR}/../../.." REALPATH)
+    find_program(QT_DEPLOY_TOOL
+                 NAMES windeployqt windeployqt6
+                 PATHS "${_qt_prefix}/bin"
+                 NO_DEFAULT_PATH
+                 REQUIRED)
+
+    #
+    # --- 2. Figure out the configuration name for windeployqt -----------------
+    #
+    # In multi-config generators (Visual Studio) the build type is decided
+    # *when* we invoke MSBuild, not when CMake is run.  Generator expressions
+    # hand the correct keyword (“debug” or “release”) to windeployqt.
+    #
+    set(_qt_conf $<$<CONFIG:Debug>:--debug>$<$<NOT:$<CONFIG:Debug>>:--release>)
+
+    #
+    # --- 3. Determine the mpv DLL that our IMPORTED target points at ----------
+    #
+    # $<TARGET_FILE:MPV::mpv> expands to the runtime file named in
+    # IMPORTED_LOCATION, regardless of whether that’s “libmpv-2.dll” or
+    # “C:/foo/bar/mpv-2.dll”.
+    #
+    # (no longer needed; we’ll reference the target directly)
+    # set(_mpv_dll "$<TARGET_FILE:MPV::mpv>")
+
+    #
+    # --- 4. Add the post-build rule ------------------------------------------
+    #
+    add_custom_command(TARGET P2PTogether POST_BUILD
+        # 4a) run windeployqt – this pulls in all Qt dlls, plugins, ICU, etc.
+        COMMAND "${QT_DEPLOY_TOOL}" ${_qt_conf} --compiler-runtime
+                "$<TARGET_FILE:P2PTogether>"
+
+        # 4b) copy the exact mpv runtime we linked against
+        # COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        #         "${_mpv_dll}"
+        #         "$<TARGET_FILE_DIR:P2PTogether>"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:MPV::mpv>"
+                "$<TARGET_FILE_DIR:P2PTogether>"
+
+        COMMENT "Deploying Qt and libmpv runtime files…")
+
+endif ()
 
 # Needed for mpvwidget/qthelper
 target_compile_definitions(P2PTogether PRIVATE QT_DEPRECATED_WARNINGS)
+# target_compile_definitions(P2PTogether PRIVATE PROTOBUF_CONSTINIT=)
+# target_compile_definitions(P2PTogether PRIVATE PROTOBUF_DISABLE_CONSTINIT)
+# add_compile_definitions(PROTOBUF_DISABLE_CONSTINIT)
 
 # Ensure MOC runs on headers that need it (like MpvWidget)
 set_target_properties(P2PTogether PROPERTIES AUTOMOC ON)
 
 # set(CMAKE_AUTOMOC_RELAXED_MODE ON) # Optional, can help with complex includes
 
+# --- Portability Settings for RPATH (Linux/macOS) ---
+# Set the RPATH to be relative to the executable's location.
+# This is the key to making the binaries portable without installers.
+set(CMAKE_INSTALL_RPATH "$ORIGIN") # For Linux
+if(APPLE)
+  set(CMAKE_INSTALL_RPATH "@executable_path") # For macOS
+endif()
+
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+
 # Doxygen documentation target
-find_package(Doxygen REQUIRED)
+if(DOXYGEN_FOUND)
+    message(STATUS "Doxygen found, 'doc' target will be available.")
 
-# Where to put generated docs
-set(DOXYGEN_OUT       ${CMAKE_BINARY_DIR}/docs/doxygen)
+    # Where to put generated docs
+    set(DOXYGEN_OUT       ${CMAKE_BINARY_DIR}/docs/doxygen)
 
-# Input Doxyfile and staged copy for configure_file
-set(DOXYFILE_IN       ${CMAKE_SOURCE_DIR}/Doxyfile)
-set(DOXYFILE_STAGED   ${CMAKE_BINARY_DIR}/Doxyfile)
+    # Input Doxyfile and staged copy for configure_file
+    set(DOXYFILE_IN       ${CMAKE_SOURCE_DIR}/Doxyfile)
+    set(DOXYFILE_STAGED   ${CMAKE_BINARY_DIR}/Doxyfile)
 
-# Replace @CMAKE_SOURCE_DIR@ and @CMAKE_BINARY_DIR@ in your Doxyfile
-configure_file(
-  ${DOXYFILE_IN}
-  ${DOXYFILE_STAGED}
-  @ONLY
-)
+    # Replace @CMAKE_SOURCE_DIR@ and @CMAKE_BINARY_DIR@ in your Doxyfile
+    configure_file(
+      ${DOXYFILE_IN}
+      ${DOXYFILE_STAGED}
+      @ONLY
+    )
 
-# Custom target to build docs
-add_custom_target(doc
-  # ensure the output directory exists
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${DOXYGEN_OUT}
-  # run doxygen
-  COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYFILE_STAGED}
-  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-  COMMENT "⏳ Generating Doxygen docs in ${DOXYGEN_OUT}"
-  VERBATIM
-)
+    # Custom target to build docs
+    add_custom_target(doc
+      # ensure the output directory exists
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${DOXYGEN_OUT}
+      # run doxygen
+      COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYFILE_STAGED}
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMENT "⏳ Generating Doxygen docs in ${DOXYGEN_OUT}"
+      VERBATIM
+    )
+else()
+    message(STATUS "Doxygen not found, 'doc' target will be unavailable.")
+endif()
 
 # --- Go service build target ---
 find_program(GO_EXECUTABLE go REQUIRED)
@@ -200,18 +327,22 @@ add_dependencies(go_unit_tests go_workspace generate_go_client_proto)
 add_dependencies(go_vet       go_workspace generate_go_client_proto)
 
 # --- Go client proto generation ---
+find_program(PROTOC_GEN_GO protoc-gen-go REQUIRED)
+find_program(PROTOC_GEN_GO_GRPC protoc-gen-go-grpc REQUIRED)
 set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto")
 
 add_custom_command(
   OUTPUT ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
   COMMAND ${CMAKE_COMMAND} -E make_directory ${GO_CLIENT_OUT_DIR}
   COMMAND ${PROTOC_EXECUTABLE}
+    --plugin=protoc-gen-go=${PROTOC_GEN_GO}
     --go_out=paths=source_relative:${GO_CLIENT_OUT_DIR}
+    --plugin=protoc-gen-go-grpc=${PROTOC_GEN_GO_GRPC}
     --go-grpc_out=paths=source_relative:${GO_CLIENT_OUT_DIR}
     -I ${PROTO_ROOT}
     ${ALL_PROTO_FILES}
   DEPENDS ${ALL_PROTO_FILES}
-  COMMENT "Generating Go code for client.proto"
+  COMMENT "Generating Go code for *.proto"
   VERBATIM
 )
 
@@ -219,7 +350,9 @@ add_custom_target(generate_go_client_proto ALL DEPENDS ${GO_CLIENT_OUT_DIR}/clie
 
 set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
 set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
-set(GO_SERVICE_BIN ${CMAKE_BINARY_DIR}/bin/peer_service)
+# set(GO_SERVICE_BIN ${CMAKE_BINARY_DIR}/bin/peer_service)
+set(GO_SERVICE_BIN
+    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
 set(GO_MOD_FILE ${GO_SERVICE_DIR}/go.mod)
 
 # Ensure bin directory exists
@@ -236,18 +369,52 @@ add_custom_command(
 file(GLOB_RECURSE GO_SERVICE_SRCS
      ${GO_SERVICE_DIR}/*.go)
 
-add_custom_command(
-  OUTPUT ${GO_SERVICE_BIN}
-  DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE} generate_go_client_proto
-  COMMAND ${GO_EXECUTABLE} mod tidy
-  COMMAND ${GO_EXECUTABLE} build -o ${GO_SERVICE_BIN} ${GO_SERVICE_SRC}
-  WORKING_DIRECTORY ${GO_SERVICE_DIR}
-  COMMENT "Building Go peer service"
-  VERBATIM
+add_custom_target(peer_service ALL
+    DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE} generate_go_client_proto
+    COMMAND ${GO_EXECUTABLE} mod tidy
+    COMMAND ${GO_EXECUTABLE} build
+            -o "${GO_SERVICE_BIN}"
+            "${GO_SERVICE_SRC}"
+    # COMMAND ${GO_EXECUTABLE} build -o
+    #         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/peer_service${CMAKE_EXECUTABLE_SUFFIX}"
+    #         .
+    WORKING_DIRECTORY "${GO_SERVICE_DIR}"
+    COMMENT           "Building Go peer_service - ${GO_SERVICE_BIN}"
 )
 
-add_custom_target(peer_service ALL DEPENDS ${GO_SERVICE_BIN})
+# --- FFMPEG Handling ---
+# Find the ffmpeg executable and copy it next to our other binaries post-build
+find_program(FFMPEG_EXECUTABLE ffmpeg HINTS ENV FFMPEG_PATH)
+if(FFMPEG_EXECUTABLE)
+    # On Windows, package managers like Chocolatey use shims. We need to find the real executable.
+
+    message(STATUS "Resolved ffmpeg real path: ${FFMPEG_EXECUTABLE}")
+
+    add_custom_command(TARGET P2PTogether POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FFMPEG_EXECUTABLE}"
+                "$<TARGET_FILE_DIR:P2PTogether>"
+        COMMENT "Copying ffmpeg executable to output directory")
+else()
+    message(WARNING "ffmpeg executable not found. It will not be bundled with the application. The Go service will fail if ffmpeg is not in PATH at runtime.")
+endif()
+
+find_program(FFPROBE_EXECUTABLE ffprobe HINTS ENV FFMPEG_PATH)
+if(FFPROBE_EXECUTABLE)
+    # On Windows, package managers like Chocolatey use shims. We need to find the real executable.
+
+    message(STATUS "Resolved ffprobe real path: ${FFPROBE_EXECUTABLE}")
+
+    add_custom_command(TARGET P2PTogether POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FFPROBE_EXECUTABLE}"
+                "$<TARGET_FILE_DIR:P2PTogether>"
+        COMMENT "Copying ffprobe executable to output directory")
+else()
+    message(WARNING "ffprobe executable not found. It will not be bundled with the application. The Go service will fail if ffprobe is not in PATH at runtime.")
+endif()
 
 # Ensure proto generation before build
 add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc)
 add_dependencies(P2PTogether generate_cpp_client_proto)
+add_dependencies(P2PTogether peer_service)

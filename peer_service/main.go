@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -1646,6 +1647,18 @@ func main() {
 	var initialRolesStr string
 	flag.StringVar(&initialRolesStr, "roles", "Admin", "Initial roles for this node (comma-separated, e.g., 'Streamer,Viewer')")
 	flag.Parse()
+
+	// Make ffmpeg discoverable when bundled with the application.
+	// Prepend the executable's directory to the PATH environment variable.
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+		currentPath := os.Getenv("PATH")
+		newPath := fmt.Sprintf("%s%c%s", exeDir, os.PathListSeparator, currentPath)
+		if err := os.Setenv("PATH", newPath); err != nil {
+			log.Printf("Warning: Failed to set new PATH: %v", err)
+		}
+	}
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx() // Ensure cancellation on exit

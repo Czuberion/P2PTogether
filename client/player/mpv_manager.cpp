@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 namespace player {
 
