@@ -33,24 +33,32 @@ find_library(MPV_IMPORT_LIBRARY NAMES mpv-2 mpv libmpv
 if (MPV_INCLUDE_DIR AND MPV_IMPORT_LIBRARY)
     message(STATUS "Found mpv import lib: ${MPV_IMPORT_LIBRARY}")
 
-    # locate the actual runtime DLL (same folder or ../bin)
-    get_filename_component(_mpv_dir "${MPV_IMPORT_LIBRARY}" DIRECTORY)
-    find_file(MPV_RUNTIME_DLL
-              NAMES libmpv-2.dll libmpv.dll mpv-2.dll
-              HINTS "${_mpv_dir}" "${_mpv_dir}/../bin" ENV MPV_DIR
-              PATH_SUFFIXES bin
-              NO_DEFAULT_PATH)
-    if (NOT MPV_RUNTIME_DLL)
-        message(FATAL_ERROR
-            "Found mpv import lib at ${MPV_IMPORT_LIBRARY} but no runtime DLL.")
-    endif()
+    if(WIN32)
+        # locate the actual runtime DLL (same folder or ../bin)
+        get_filename_component(_mpv_dir "${MPV_IMPORT_LIBRARY}" DIRECTORY)
+        find_file(MPV_RUNTIME_DLL
+                  NAMES libmpv-2.dll libmpv.dll mpv-2.dll
+                  HINTS "${_mpv_dir}" "${_mpv_dir}/../bin" ENV MPV_DIR
+                  PATH_SUFFIXES bin
+                  NO_DEFAULT_PATH)
+        if (NOT MPV_RUNTIME_DLL)
+            message(FATAL_ERROR
+                "Found mpv import lib at ${MPV_IMPORT_LIBRARY} but no runtime DLL.")
+        endif()
 
-    # create the imported target
-    add_library(MPV::mpv SHARED IMPORTED)
-    set_target_properties(MPV::mpv PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${MPV_INCLUDE_DIR}"
-        IMPORTED_IMPLIB               "${MPV_IMPORT_LIBRARY}"
-        IMPORTED_LOCATION             "${MPV_RUNTIME_DLL}")
+        # create the imported target
+        add_library(MPV::mpv SHARED IMPORTED)
+        set_target_properties(MPV::mpv PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${MPV_INCLUDE_DIR}"
+            IMPORTED_IMPLIB               "${MPV_IMPORT_LIBRARY}"
+            IMPORTED_LOCATION             "${MPV_RUNTIME_DLL}")
+    else()
+        # On Linux/macOS, the import lib is the shared library
+        add_library(MPV::mpv SHARED IMPORTED)
+        set_target_properties(MPV::mpv PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${MPV_INCLUDE_DIR}"
+            IMPORTED_LOCATION             "${MPV_IMPORT_LIBRARY}")
+    endif()
 
     # # On Windows the linker also needs the import library (*.lib / *.dll.a)
     # if (WIN32)
