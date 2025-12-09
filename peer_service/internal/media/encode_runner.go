@@ -11,6 +11,9 @@ import (
 	// "github.com/u2takey/ffmpeg-go" // No longer directly used here
 )
 
+// execCommandContext allows mocking exec.CommandContext in tests.
+var execCommandContext = exec.CommandContext
+
 type EncoderRunner struct {
 	HlsPort uint32 // Port for the HLS ingest endpoint
 
@@ -120,7 +123,7 @@ func (r *EncoderRunner) Start(ctx context.Context, filePath string, seqBase uint
 		// }
 		// compiledCmd.Args already includes the program name as Args[0] if using ffmpeg-go's Compile()
 		// So, for exec.CommandContext, it should be compiledCmd.Args[0] (path) and compiledCmd.Args[1:]... (arguments)
-		currentCmd = exec.CommandContext(ctx, compiledCmd.Path, compiledCmd.Args[1:]...)
+		currentCmd = execCommandContext(ctx, compiledCmd.Path, compiledCmd.Args[1:]...)
 		currentCmd.Stdout = log.Writer() // Capture ffmpeg stdout
 		currentCmd.Stderr = log.Writer() // Capture ffmpeg stderr
 

@@ -400,13 +400,17 @@ func (qc *QueueController) Handle(ctx context.Context, cmd *p2ppb.QueueCmd, send
 }
 
 // ApplyUpdate replaces the entire local queue state with the items from the received update.
-// This is called when a QueueUpdate is received from GossipSub.
-// References to node, hub, rm are now part of QueueController struct.
-func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub, node *Node, rm *roles.RoleManager) {
+// It enforces RBAC: the sender must have PermQueue to update the queue.
+func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, from peer.ID, localHub *Hub, node *Node, rm *roles.RoleManager) error {
+	perms := rm.GetPermissionsForPeer(from)
+	if !perms.Has(roles.PermQueue) {
+		return fmt.Errorf("ApplyUpdate: permission denied. Peer %s lacks PermQueue", from)
+	}
+
 	// TODO: Implement HLC check for the update message itself (update.HlcTs)
 	//       against a locally stored HLC for the last applied queue update.
 	//       For now, always apply.
-	log.Printf("QueueController.ApplyUpdate: Applying full queue update with HLC %d. Items: %d", update.HlcTs, len(update.Items))
+	log.Printf("QueueController.ApplyUpdate: Applying full queue update from %s with HLC %d. Items: %d", from, update.HlcTs, len(update.Items))
 
 	newItems := make([]QueueItem, 0, len(update.Items))
 	for _, pbItem := range update.Items {
@@ -455,4 +459,5 @@ func (qc *QueueController) ApplyUpdate(update *p2ppb.QueueUpdate, localHub *Hub,
 	} else if qc.nodeRef != nil { // Use internal ref
 		qc.nodeRef.ReactToQueueUpdate()
 	}
+	return nil
 }

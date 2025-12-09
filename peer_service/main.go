@@ -797,7 +797,7 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			}
 
 			// --- Process successful JoinSessionResponse from Admin ---
-			s.processAdminJoinResponse(&adminJoinResp) // Call new helper function
+			s.processAdminJoinResponse(&adminJoinResp, adminInfo.ID) // Call new helper function
 
 			// Send the Admin's response (which includes the snapshot) to the local GUI.
 			if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: &adminJoinResp}}); errSend != nil {
@@ -917,7 +917,7 @@ func (s *server) publishToChatTopic(ctx context.Context, msg *clientpb.ServerMsg
 
 // processAdminJoinResponse handles the successful JoinSessionResponse received from the Admin.
 // This is called by the Joiner's Peer Service.
-func (s *server) processAdminJoinResponse(adminResp *p2ppb.JoinSessionResponse) {
+func (s *server) processAdminJoinResponse(adminResp *p2ppb.JoinSessionResponse, adminID peer.ID) {
 	log.Printf("Joiner: Processing successful JoinSessionResponse from Admin. SessionID: %s. Roles: %v. Snapshot size: %d bytes",
 		adminResp.GetSessionId(), adminResp.GetAssignedRoles(), len(adminResp.GetSessionSnapshot()))
 
@@ -939,8 +939,11 @@ func (s *server) processAdminJoinResponse(adminResp *p2ppb.JoinSessionResponse) 
 				}
 			}
 			if snapQueue := sessionStateData.GetCurrentQueueState(); snapQueue != nil {
-				s.queueCtrl.ApplyUpdate(snapQueue, s.hub, s.node, s.roleManager)
-				log.Printf("Joiner: Applied queue state snapshot.")
+				if err := s.queueCtrl.ApplyUpdate(snapQueue, adminID, s.hub, s.node, s.roleManager); err != nil {
+					log.Printf("Joiner: Error applying queue snapshot from Admin: %v", err)
+				} else {
+					log.Printf("Joiner: Applied queue state snapshot.")
+				}
 			}
 			// TODO: Apply playback state if present (sessionStateData.GetCurrentPlaybackState())
 		}
@@ -1423,7 +1426,9 @@ func processChatTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv
 
 func handleGossipQueueUpdate(update *p2ppb.QueueUpdate, from peer.ID, srv *server) {
 	log.Printf("[gossip Ctrl] handleGossipQueueUpdate: received from %s (HLC: %d)", from, update.HlcTs)
-	srv.queueCtrl.ApplyUpdate(update, srv.hub, srv.node, srv.roleManager)
+	if err := srv.queueCtrl.ApplyUpdate(update, from, srv.hub, srv.node, srv.roleManager); err != nil {
+		log.Printf("[gossip Ctrl] Rejected QueueUpdate from %s: %v", from, err)
+	}
 }
 
 func handleGossipRoleDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate, from peer.ID, srv *server) {
