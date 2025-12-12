@@ -24,20 +24,34 @@ def run_integration_test():
     service_grpc_port = None
     service_logs = []
     
-    regex_addr = re.compile(r"Listening on address: /ip4/127\.0\.0\.1/tcp/(\d+)/p2p/([a-zA-Z0-9]+)")
+    # Regex to capture just the P2P ID and Port.
+    # We look for "Listening on address: <addr>/p2p/<ID>"
+    # We'll try to match IPv4 loopback first, but fallback if needed.
+    regex_addr_strict = re.compile(r"Listening on address: /ip4/127\.0\.0\.1/tcp/(\d+)/p2p/([a-zA-Z0-9]+)")
+    regex_addr_loose = re.compile(r"Listening on address: .*/tcp/(\d+)/p2p/([a-zA-Z0-9]+)")
+    
     regex_grpc = re.compile(r"gRPC server listening on 127.0.0.1:(\d+)")
 
     def read_service():
         nonlocal service_peer_id, service_p2p_port, service_grpc_port, service_logs
         for line in iter(proc_service.stdout.readline, ''):
             service_logs.append(line)
-            # sys.stdout.write(f"[Service] {line}")
+            # Check for P2P Address
             if not service_peer_id:
-                m = regex_addr.search(line)
+                # Try strict first
+                m = regex_addr_strict.search(line)
                 if m:
                     service_p2p_port = m.group(1)
                     service_peer_id = m.group(2)
-                    print(f"\n[Service] Captured ID: {service_peer_id} on Port: {service_p2p_port}\n")
+                    print(f"\n[Service] Captured ID: {service_peer_id} on Port: {service_p2p_port} (Strict)\n")
+                else:
+                    # Try loose if strict failed
+                    m2 = regex_addr_loose.search(line)
+                    if m2:
+                         service_p2p_port = m2.group(1)
+                         service_peer_id = m2.group(2)
+                         print(f"\n[Service] Captured ID: {service_peer_id} on Port: {service_p2p_port} (Loose)\n")
+
             if not service_grpc_port:
                 m = regex_grpc.search(line)
                 if m:
@@ -47,8 +61,13 @@ def run_integration_test():
     t_svc = threading.Thread(target=read_service)
     t_svc.start()
 
-    # Wait for service to obtain ID and gRPC port
-    time.sleep(5)
+    # Wait for service to obtain ID and gRPC port (Polling up to 15s)
+    start_wait = time.time()
+    while time.time() - start_wait < 15:
+        if service_peer_id and service_grpc_port:
+            break
+        time.sleep(0.5)
+
     if not service_peer_id or not service_grpc_port:
         print("ERROR: peer_service failed to start or didn't log address/port in time.")
         print("--- SERVICE OUTPUT START ---")
@@ -113,6 +132,10 @@ def run_integration_test():
     
     if not patterns["auth_success"]:
         print("ERROR: Auth Handshake failed.")
+        print("--- SERVICE OUTPUT START ---")
+        for l in service_logs:
+            sys.stdout.write(l)
+        print("--- SERVICE OUTPUT END ---")
         proc_service.terminate()
         proc_tester.terminate()
         return False

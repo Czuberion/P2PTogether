@@ -22,7 +22,10 @@ def run_complex_interop_test():
     service_grpc_port = None
     service_logs = []
     
-    regex_addr = re.compile(r"Listening on address: /ip4/127\.0\.0\.1/tcp/(\d+)/p2p/([a-zA-Z0-9]+)")
+    # Regex to capture just the P2P ID and Port.
+    regex_addr_strict = re.compile(r"Listening on address: /ip4/127\.0\.0\.1/tcp/(\d+)/p2p/([a-zA-Z0-9]+)")
+    regex_addr_loose = re.compile(r"Listening on address: .*/tcp/(\d+)/p2p/([a-zA-Z0-9]+)")
+    
     regex_grpc = re.compile(r"gRPC server listening on 127.0.0.1:(\d+)")
 
     def read_service():
@@ -30,11 +33,17 @@ def run_complex_interop_test():
         for line in iter(proc_service.stdout.readline, ''):
             service_logs.append(line)
             if not service_peer_id:
-                m = regex_addr.search(line)
+                m = regex_addr_strict.search(line)
                 if m:
                     service_p2p_port = m.group(1)
                     service_peer_id = m.group(2)
-                    print(f"\n[Service] Captured ID: {service_peer_id} on Port: {service_p2p_port}\n")
+                    print(f"\n[Service] Captured ID: {service_peer_id} on Port: {service_p2p_port} (Strict)\n")
+                else:
+                    m2 = regex_addr_loose.search(line)
+                    if m2:
+                        service_p2p_port = m2.group(1)
+                        service_peer_id = m2.group(2)
+                        print(f"\n[Service] Captured ID: {service_peer_id} on Port: {service_p2p_port} (Loose)\n")
             if not service_grpc_port:
                 m = regex_grpc.search(line)
                 if m:
@@ -44,8 +53,13 @@ def run_complex_interop_test():
     t_svc = threading.Thread(target=read_service)
     t_svc.start()
 
-    # Wait for service to obtain ID and gRPC port
-    time.sleep(5)
+    # Wait for service to obtain ID and gRPC port (Polling up to 15s)
+    start_wait = time.time()
+    while time.time() - start_wait < 15:
+        if service_peer_id and service_grpc_port:
+            break
+        time.sleep(0.5)
+
     if not service_peer_id or not service_grpc_port:
         print("ERROR: peer_service failed to start or didn't log address/port in time.")
         proc_service.terminate()
@@ -142,13 +156,14 @@ def run_complex_interop_test():
     
     time.sleep(2)
     
-    # 5. Tester sends chat back (Optional, just to keep activity)
+    # 5. Viewer sends chat back (Optional, just to keep activity)
+    print("[5] Viewer sending chat message...")
     proc_tester.stdin.write("chat Hello back\n")
     proc_tester.stdin.flush()
     
     time.sleep(2)
 
-    # 6. Admin assigns Role 'Streamer' to Tester
+    # 6. Admin assigns Role 'Streamer' to Viewer
     print(f"[6] Admin assigning 'Streamer' role to {tester_peer_id}...")
     cmd_driver_role = ["./grpc_driver", "-addr", f"127.0.0.1:{service_grpc_port}", "-cmd", "assign-role", "-target-peer", tester_peer_id, "-roles", "Streamer"]
     subprocess.run(cmd_driver_role, capture_output=True)
