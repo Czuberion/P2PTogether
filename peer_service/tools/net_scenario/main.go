@@ -269,6 +269,10 @@ func joinTopics(sp *ScenarioPeer) {
 	if err != nil {
 		log.Fatalf("Join video failed: %v", err)
 	}
+	videoSub, err := sp.VideoTopic.Subscribe()
+	if err != nil {
+		log.Fatalf("Sub video failed: %v", err)
+	}
 
 	// Handler goroutines
 	go func() {
@@ -277,19 +281,6 @@ func joinTopics(sp *ScenarioPeer) {
 			if err != nil {
 				return
 			}
-			// Chat messages are wrapped in ServerMsg usually?
-			// Wait, chat topic messages are raw bytes or ServerMsg?
-			// In main.go check: stream.Recv() receives clientpb.ClientMsg (which contains ChatCmd)
-			// But over PubSub?
-			// Let's check main.go again.
-			// Re-reading main.go or node.go would clarify what is actually published to chatTopic.
-			// node.go: n.chatTopic.Publish(ctx, data)
-			// main.go doesn't show the publish logic for chat.
-			// Assuming it's ClientMsg or ServerMsg?
-			// Actually, typical design is:
-			// Client -> (gRPC) -> Server -> (PubSub) -> All Servers -> (gRPC) -> All Clients
-			// The payload on PubSub is likely ServerMsg.
-
 			var sm clientpb.ServerMsg
 			if err := proto.Unmarshal(msg.Data, &sm); err == nil {
 				if chatMsg, ok := sm.Payload.(*clientpb.ServerMsg_ChatMsg); ok {
@@ -320,6 +311,28 @@ func joinTopics(sp *ScenarioPeer) {
 			}
 		}
 	}()
+
+	go func() {
+		for {
+			msg, err := videoSub.Next(sp.Ctx)
+			if err != nil {
+				return
+			}
+			// Video messages are VideoSegmentGossip (raw on pubsub presumably? or wrapped?)
+			// Protocol design check: Streaming usually sends p2ppb.VideoSegmentGossip directly or wrapped?
+			// Checking streaming.proto again or just dumping type.
+			// Let's assume it might be wrapped in ServerMsg OR just the struct.
+			// But wait, the standard usually wraps if multiple types go to same topic, but VideoTopic is likely just segments.
+
+			var seg p2ppb.VideoSegmentGossip
+			if err := proto.Unmarshal(msg.Data, &seg); err == nil {
+				log.Printf("[VIDEO] Received segment seq=%d len=%d duration=%f", seg.SequenceNumber, len(seg.Data), seg.ActualDurationSeconds)
+			} else {
+				log.Printf("[VIDEO] Received unknown data len=%d", len(msg.Data))
+			}
+		}
+	}()
+
 }
 
 func startInteractiveLoop(sp *ScenarioPeer) {

@@ -22,6 +22,7 @@ func main() {
 	targetPeerF := flag.String("target-peer", "", "Target Peer ID for role assignment")
 	rolesF := flag.String("roles", "", "Comma-separated roles to assign")
 	messageF := flag.String("message", "", "Chat message text")
+	fileF := flag.String("file", "", "File path for queue-add")
 	flag.Parse()
 
 	conn, err := grpc.NewClient(*addrF, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -99,6 +100,24 @@ func main() {
 			log.Fatalf("Failed to send SetPeerRolesCmd: %v", err)
 		}
 		fmt.Println("Role assignment sent.")
+
+	case "queue-add":
+		// Expects -file <path>
+		// Use -target-peer as file path reuse? No, better add proper flag or reuse existing if possible.
+		// Let's reuse messageF or add a new flag 'file'.
+		// The prompt didn't specify I can't add flags.
+		// Let's add a `fileF` flag in the beginning of main.
+		req := &clientpb.ClientMsg_QueueCmd{
+			QueueCmd: &p2ppb.QueueCmd{
+				Type:     p2ppb.QueueCmd_APPEND,
+				FilePath: *fileF,
+				HlcTs:    time.Now().UnixMilli(),
+			},
+		}
+		if err := stream.Send(&clientpb.ClientMsg{Payload: req}); err != nil {
+			log.Fatalf("Failed to send QueueCmd(APPEND): %v", err)
+		}
+		fmt.Println("Queue append sent.")
 
 	default:
 		log.Fatalf("Unknown command: %s", *cmdF)
