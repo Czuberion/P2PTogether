@@ -7,7 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(CTest)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets Network Test)
+if(TARGET Qt6::Test)
+    get_target_property(QT_TEST_LOC Qt6::Test LOCATION)
+    message(STATUS "Qt6::Test LOCATION: ${QT_TEST_LOC}")
+else()
+    message(WARNING "Qt6::Test target not found!")
+endif()
 find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 find_package(Doxygen QUIET)
@@ -99,6 +105,7 @@ set(SOURCES
     client/transport/grpc_client.cpp
     client/transport/control_stream_worker.cpp
     client/roles/role_store.cpp
+    client/test/test_server.cpp
 )
 
 set(HEADERS
@@ -115,6 +122,7 @@ set(HEADERS
     client/utils/net.h
     client/roles/role_store.h
     client/roles/permissions.h
+    client/test/test_server.h
 )
 
 # --- C++ gRPC/protobuf stub generation ---
@@ -164,6 +172,12 @@ target_link_libraries(P2PTogether PRIVATE
     MPV::mpv
     gRPC::grpc++
 )
+
+if(TARGET Qt6::Test)
+    get_target_property(QT_TEST_LOC Qt6::Test LOCATION)
+    message(STATUS "Forcing link of Qt6::Test library: ${QT_TEST_LOC}")
+    target_link_libraries(P2PTogether PRIVATE ${QT_TEST_LOC})
+endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Post-build deploy step (only runs on Windows)

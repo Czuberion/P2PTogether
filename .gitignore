@@ -1,4 +1,5 @@
 .vscode
+.cache
 build
 go.mod
 go.sum
