@@ -56,8 +56,10 @@ static void showSessionInfoDialogHelper(
 
   if (!inviteCode.isEmpty()) {
     QHBoxLayout *inviteLayout = new QHBoxLayout();
-    inviteLayout->addWidget(
-        new QLabel(QString("Invite Code: %1").arg(inviteCode), &infoDialog));
+    QLabel *inviteLabel =
+        new QLabel(QString("Invite Code: %1").arg(inviteCode), &infoDialog);
+    inviteLabel->setObjectName("inviteCodeLabel");
+    inviteLayout->addWidget(inviteLabel);
     QPushButton *copyButton = new QPushButton("⧉");
     copyButton->setToolTip("Copy Invite Code to Clipboard");
     copyButton->setFixedSize(copyButton->fontMetrics().height() * 2,

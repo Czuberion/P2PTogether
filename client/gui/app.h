@@ -47,6 +47,7 @@ public:
 
   // Test mode configuration
   void enableTestMode(quint16 port);
+  TestServer *testServer() const { return m_testServer; }
 
   double playlistOriginSec() const { return m_playlistOriginSec; }
 

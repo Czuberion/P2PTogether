@@ -36,6 +36,7 @@ static void showSessionInfoDialog(const QString &title,
                                   const QString &inviteCode, QWidget *parent) {
   QDialog infoDialog(parent);
   infoDialog.setWindowTitle(title);
+  infoDialog.setObjectName("sessionInfoDialog");
   QVBoxLayout *layout = new QVBoxLayout(&infoDialog);
 
   layout->addWidget(new QLabel(messageBody, &infoDialog));
@@ -50,8 +51,10 @@ static void showSessionInfoDialog(const QString &title,
 
   if (!inviteCode.isEmpty()) {
     QHBoxLayout *inviteLayout = new QHBoxLayout();
-    inviteLayout->addWidget(
-        new QLabel(QString("Invite Code: %1").arg(inviteCode), &infoDialog));
+    QLabel *inviteLabel =
+        new QLabel(QString("Invite Code: %1").arg(inviteCode), &infoDialog);
+    inviteLabel->setObjectName("inviteCodeLabel");
+    inviteLayout->addWidget(inviteLabel);
     QPushButton *copyButton = new QPushButton("⧉");
     copyButton->setToolTip("Copy Invite Code to Clipboard");
     copyButton->setFixedSize(copyButton->fontMetrics().height() * 2,
@@ -66,6 +69,7 @@ static void showSessionInfoDialog(const QString &title,
 
   QDialogButtonBox *buttonBox =
       new QDialogButtonBox(QDialogButtonBox::Ok, &infoDialog);
+  buttonBox->setObjectName("sessionInfoBtnBox");
   QObject::connect(buttonBox, &QDialogButtonBox::accepted, &infoDialog,
                    &QDialog::accept);
   layout->addWidget(buttonBox);
@@ -350,6 +354,15 @@ void App::onServerMessage(const client::ServerMsg &msg) {
               << "InviteCode:" << QString::fromStdString(resp.invite_code());
       setActiveSessionDetails(QString::fromStdString(resp.session_id()),
                               QString::fromStdString(resp.invite_code()));
+
+      // Notify test server BEFORE emitting signal that triggers blocking dialog
+      if (m_testServer) {
+        QJsonObject eventData;
+        eventData["session_id"] = QString::fromStdString(resp.session_id());
+        eventData["invite_code"] = QString::fromStdString(resp.invite_code());
+        m_testServer->registerEvent("session_created", eventData);
+      }
+
       qInfo() << "App::onServerMessage - About to emit "
                  "sessionCreatedSuccessfully...";
       emit sessionCreatedSuccessfully(
@@ -464,6 +477,17 @@ void App::onServerMessage(const client::ServerMsg &msg) {
           m_currentQueueItems.clear();
           emit queueStateChanged();
         }
+      }
+
+      // Notify test server if in test mode (before showing dialog which blocks)
+      if (m_testServer) {
+        QJsonObject eventData;
+        eventData["session_id"] = QString::fromStdString(resp.session_id());
+        if (resp.has_session_name()) {
+          eventData["session_name"] =
+              QString::fromStdString(resp.session_name());
+        }
+        m_testServer->registerEvent("session_joined", eventData);
       }
 
       showSessionInfoDialog(
@@ -658,6 +682,11 @@ void App::setupUI() {
   if (m_testModeEnabled) {
     m_testServer = new TestServer(m_mainWindow, m_testPort);
     qInfo() << "Test server listening on port" << m_testServer->serverPort();
+
+    // Notify that GUI is ready to receive test commands
+    QJsonObject eventData;
+    eventData["port"] = m_testServer->serverPort();
+    m_testServer->registerEvent("gui_ready", eventData);
   }
 }
 

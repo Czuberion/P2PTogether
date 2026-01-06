@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
-	// "gopkg.in/yaml.v3" // Commented out until verify dependency
 )
 
 const (
@@ -28,6 +29,7 @@ type Orchestrator struct {
 	Host         host.Host
 	Agents       map[string]peer.AddrInfo // Map Agent ID (or role?) to PeerInfo
 	AgentStreams map[string]network.Stream
+	Variables    map[string]string // Captured variables for substitution
 	Ctx          context.Context
 	mu           sync.Mutex
 }
@@ -57,6 +59,7 @@ func main() {
 		Ctx:          ctx,
 		Agents:       make(map[string]peer.AddrInfo),
 		AgentStreams: make(map[string]network.Stream),
+		Variables:    make(map[string]string),
 	}
 
 	// 2. Setup mDNS Discovery
@@ -128,6 +131,7 @@ type Step struct {
 	AgentIndex int               `json:"agent_index"` // 0-based index in discovered list
 	Action     string            `json:"action"`
 	Args       map[string]string `json:"args"`
+	CaptureAs  string            `json:"capture_as,omitempty"` // Variable name to store response data
 }
 
 func (o *Orchestrator) RunScenario(path string) error {
@@ -162,7 +166,7 @@ func (o *Orchestrator) RunScenario(path string) error {
 		agentID := agentIDs[step.AgentIndex]
 
 		// Execute step
-		if err := o.SendCommand(agentID, step.Action, step.Args); err != nil {
+		if err := o.SendCommand(agentID, step.Action, step.Args, step.CaptureAs); err != nil {
 			return fmt.Errorf("step failed: %v", err)
 		}
 	}
@@ -170,29 +174,113 @@ func (o *Orchestrator) RunScenario(path string) error {
 	return nil
 }
 
-func (o *Orchestrator) SendCommand(agentID string, action string, args map[string]string) error {
-	s, ok := o.AgentStreams[agentID]
-	if !ok {
-		return fmt.Errorf("no stream for agent %s", agentID)
+// substituteVariables replaces ${varName} patterns in args with values from Variables map
+func (o *Orchestrator) substituteVariables(args map[string]string) map[string]string {
+	result := make(map[string]string)
+	varPattern := regexp.MustCompile(`\$\{([^}]+)\}`)
+
+	for k, v := range args {
+		result[k] = varPattern.ReplaceAllStringFunc(v, func(match string) string {
+			varName := varPattern.FindStringSubmatch(match)[1]
+			if val, ok := o.Variables[varName]; ok {
+				return val
+			}
+			log.Printf("Warning: variable ${%s} not found, keeping as-is", varName)
+			return match
+		})
 	}
+	return result
+}
+
+func (o *Orchestrator) SendCommand(agentID string, action string, args map[string]string, captureAs string) error {
+	// Substitute variables in args
+	substitutedArgs := o.substituteVariables(args)
 
 	cmd := map[string]interface{}{
 		"action": action,
-		"args":   args,
+		"args":   substitutedArgs,
 	}
 	bytes, _ := json.Marshal(cmd)
 
-	log.Printf("Sending to %s: %s", agentID, string(bytes))
-	s.Write(bytes)
-	s.Write([]byte("\n"))
+	// Try to send command, reconnect if stream is stale
+	for attempt := 0; attempt < 2; attempt++ {
+		s, ok := o.AgentStreams[agentID]
+		if !ok {
+			// Try to reconnect
+			if err := o.reconnectAgent(agentID); err != nil {
+				return fmt.Errorf("no stream for agent %s and reconnect failed: %v", agentID, err)
+			}
+			s = o.AgentStreams[agentID]
+		}
 
-	// Read response
-	reader := bufio.NewReader(s)
-	respLine, err := reader.ReadString('\n')
-	if err != nil {
-		return err
+		log.Printf("Sending to %s: %s", agentID, string(bytes))
+		_, err := s.Write(bytes)
+		if err != nil {
+			log.Printf("Write failed to %s (attempt %d): %v - retrying with fresh stream", agentID, attempt+1, err)
+			s.Close()
+			delete(o.AgentStreams, agentID)
+			continue
+		}
+		_, err = s.Write([]byte("\n"))
+		if err != nil {
+			log.Printf("Write newline failed to %s (attempt %d): %v - retrying with fresh stream", agentID, attempt+1, err)
+			s.Close()
+			delete(o.AgentStreams, agentID)
+			continue
+		}
+
+		// Read response
+		reader := bufio.NewReader(s)
+		respLine, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("Read failed from %s (attempt %d): %v - retrying with fresh stream", agentID, attempt+1, err)
+			s.Close()
+			delete(o.AgentStreams, agentID)
+			continue
+		}
+		log.Printf("Response from %s: %s", agentID, respLine)
+
+		// Capture data if requested
+		if captureAs != "" {
+			var resp map[string]interface{}
+			if err := json.Unmarshal([]byte(respLine), &resp); err == nil {
+				if data, ok := resp["data"].(string); ok {
+					// Strip known label prefixes (e.g., "Invite Code: ABC123" -> "ABC123")
+					data = strings.TrimPrefix(data, "Invite Code: ")
+					data = strings.TrimPrefix(data, "Session ID: ")
+					data = strings.TrimSpace(data)
+					o.Variables[captureAs] = data
+					log.Printf("Captured variable %s = %s", captureAs, data)
+				}
+			}
+		}
+
+		return nil
 	}
-	log.Printf("Response from %s: %s", agentID, respLine)
 
+	return fmt.Errorf("failed to communicate with agent %s after retries", agentID)
+}
+
+func (o *Orchestrator) reconnectAgent(agentID string) error {
+	o.mu.Lock()
+	pi, ok := o.Agents[agentID]
+	o.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("agent %s not found", agentID)
+	}
+
+	log.Printf("Reconnecting to agent %s...", agentID)
+
+	if err := o.Host.Connect(o.Ctx, pi); err != nil {
+		return fmt.Errorf("failed to connect: %v", err)
+	}
+
+	s, err := o.Host.NewStream(o.Ctx, pi.ID, AgentProtocolID)
+	if err != nil {
+		return fmt.Errorf("failed to open stream: %v", err)
+	}
+
+	o.AgentStreams[agentID] = s
+	log.Printf("Reconnected to agent %s", agentID)
 	return nil
 }

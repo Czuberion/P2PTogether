@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,9 +28,9 @@ import (
 )
 
 const (
-	AgentProtocolID = "/p2ptogether-test/agent/1.0.0"
-	MdnsServiceTag  = "_p2ptogether-test._tcp"
-	GuiTestPort     = 19999
+	AgentProtocolID    = "/p2ptogether-test/agent/1.0.0"
+	MdnsServiceTag     = "_p2ptogether-test._tcp"
+	DefaultGuiTestPort = 19999
 )
 
 type Agent struct {
@@ -60,7 +64,7 @@ func main() {
 		Host:           h,
 		Ctx:            ctx,
 		Cancel:         cancel,
-		GUIPort:        GuiTestPort,
+		GUIPort:        0, // Will be auto-detected when GUI starts
 		DefaultBinPath: *guiBin,
 	}
 
@@ -141,7 +145,18 @@ func (a *Agent) processCommand(jsonCmd string) string {
 	case "stop_gui":
 		err = a.StopGUI()
 	case "gui_command":
-		err = a.SendGUICommand(cmd.Args["payload"])
+		guiResponse, guiErr := a.SendGUICommand(cmd.Args["payload"])
+		if guiErr != nil {
+			return errorResponse(guiErr.Error())
+		}
+		// Forward data from GUI response if present
+		var guiResp map[string]interface{}
+		if json.Unmarshal([]byte(guiResponse), &guiResp) == nil {
+			if data, ok := guiResp["data"].(string); ok {
+				return successResponseWithData(data)
+			}
+		}
+		return successResponse("OK")
 	case "ping":
 		return successResponse("pong")
 	default:
@@ -187,22 +202,62 @@ func (a *Agent) StartGUI(binPath string) error {
 		binPath = abs
 	}
 
+	// Start with port 0 to let OS pick a free port
 	cmd := exec.Command(binPath,
 		"--test-mode",
-		fmt.Sprintf("--test-port=%d", a.GUIPort),
+		"--test-port=0",
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
-	log.Printf("Starting GUI: %s --test-mode --test-port=%d", binPath, a.GUIPort)
+	// Capture stdout and stderr to parse for actual port (Qt logs to stderr via qInfo)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %v", err)
+	}
+
+	log.Printf("Starting GUI: %s --test-mode --test-port=0", binPath)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
 	a.GUIProcess = cmd
 
-	// Give it a moment to start listening
-	time.Sleep(2 * time.Second)
+	// Parse both stdout and stderr for the actual port, with timeout
+	portChan := make(chan int, 1)
+	portPattern := regexp.MustCompile(`Test server listening on port (\d+)`)
+
+	// Helper to scan a reader for port
+	scanForPort := func(reader io.Reader, name string) {
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Printf("[%s] %s\n", name, line) // Echo to console with label
+			if matches := portPattern.FindStringSubmatch(line); len(matches) > 1 {
+				if port, err := strconv.Atoi(matches[1]); err == nil {
+					select {
+					case portChan <- port:
+					default: // Already found
+					}
+				}
+			}
+		}
+	}
+
+	go scanForPort(stdout, "stdout")
+	go scanForPort(stderr, "stderr")
+
+	// Wait for port discovery with timeout
+	select {
+	case port := <-portChan:
+		a.GUIPort = port
+		log.Printf("Discovered GUI test server on port %d", port)
+	case <-time.After(30 * time.Second):
+		log.Printf("Warning: Could not discover GUI test port, using default %d", DefaultGuiTestPort)
+		a.GUIPort = DefaultGuiTestPort
+	}
 
 	return nil
 }
@@ -226,7 +281,7 @@ func (a *Agent) StopGUI() error {
 	return nil
 }
 
-func (a *Agent) SendGUICommand(payload string) error {
+func (a *Agent) SendGUICommand(payload string) (string, error) {
 	// Connect to GUI TCP port with retries
 	var conn net.Conn
 	var err error
@@ -238,16 +293,64 @@ func (a *Agent) SendGUICommand(payload string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to connect to GUI test server after retries: %v", err)
+		return "", fmt.Errorf("failed to connect to GUI test server after retries: %v", err)
 	}
 	defer conn.Close()
 
 	log.Printf("Sending to GUI: %s", payload)
 	_, err = fmt.Fprintf(conn, "%s\n", payload)
-	return err
+	if err != nil {
+		return "", err
+	}
+
+	// Determine timeout based on command type
+	// For wait_for_event commands, use the timeout from the payload (or a generous default)
+	readTimeout := 2 * time.Second // Default for most commands
+
+	var payloadObj map[string]interface{}
+	if json.Unmarshal([]byte(payload), &payloadObj) == nil {
+		if action, ok := payloadObj["action"].(string); ok && action == "wait_for_event" {
+			// Extract timeout from args if present
+			if args, ok := payloadObj["args"].(map[string]interface{}); ok {
+				if timeoutMs, ok := args["timeout_ms"].(float64); ok && timeoutMs > 0 {
+					// Add 5 seconds buffer to the GUI timeout
+					readTimeout = time.Duration(timeoutMs+5000) * time.Millisecond
+				} else {
+					// Default wait_for_event timeout: 2 minutes + buffer
+					readTimeout = 125 * time.Second
+				}
+			} else {
+				readTimeout = 125 * time.Second
+			}
+			log.Printf("wait_for_event detected, using timeout: %v", readTimeout)
+		}
+	}
+
+	// Read response from GUI with timeout
+	// Some commands (like trigger_menu opening modal dialogs) won't respond until dialog closes
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
+	reader := bufio.NewReader(conn)
+	respLine, err := reader.ReadString('\n')
+	if err != nil {
+		// Timeout or EOF is expected for commands that trigger modal dialogs (except wait_for_event)
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			log.Printf("Read timeout (expected for modal dialogs)")
+			return "", nil
+		}
+		log.Printf("Warning: no response from GUI: %v", err)
+		return "", nil // Not an error - GUI might not respond
+	}
+	log.Printf("Response from GUI: %s", respLine)
+	return strings.TrimSpace(respLine), nil
 }
 
 func successResponse(data string) string {
+	r := Response{Status: "ok", Data: data}
+	b, _ := json.Marshal(r)
+	return string(b)
+}
+
+func successResponseWithData(data string) string {
 	r := Response{Status: "ok", Data: data}
 	b, _ := json.Marshal(r)
 	return string(b)
