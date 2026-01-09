@@ -9,6 +9,10 @@
 
 class QTcpSocket;
 
+namespace gui {
+class App;
+}
+
 // Structure to track pending event waiters
 struct PendingEventWaiter {
   QPointer<QTcpSocket> socket;
@@ -19,7 +23,7 @@ struct PendingEventWaiter {
 class TestServer : public QTcpServer {
   Q_OBJECT
 public:
-  TestServer(QMainWindow *window, quint16 port);
+  TestServer(gui::App *app, QMainWindow *window, quint16 port);
 
   // Called by GUI (e.g., App) to notify that an event occurred
   // This will wake up any waiting command for this event type
@@ -30,6 +34,7 @@ private slots:
   void onReadyRead();
 
 private:
+  gui::App *m_app;
   QMainWindow *m_window;
 
   // Event waiting infrastructure

@@ -1,4 +1,5 @@
 #include "test_server.h"
+#include "gui/app.h"
 #include <QApplication>
 #include <QDialogButtonBox>
 #include <QJsonDocument>
@@ -10,7 +11,8 @@
 #include <QTcpSocket>
 #include <QTimer>
 
-TestServer::TestServer(QMainWindow *window, quint16 port) : m_window(window) {
+TestServer::TestServer(gui::App *app, QMainWindow *window, quint16 port)
+    : m_app(app), m_window(window) {
   if (this->listen(QHostAddress::Any, port)) {
     connect(this, &QTcpServer::newConnection, this,
             &TestServer::onNewConnection);
@@ -325,6 +327,15 @@ QJsonObject TestServer::executeCommand(const QJsonObject &cmd) {
     result["event_type"] = eventType;
     result["timeout_ms"] = timeoutMs;
     success = true;
+  } else if (action == "add_video_to_queue") {
+    QString path = args["path"].toString();
+    if (m_app) {
+      m_app->addVideoToQueue(path);
+      success = true;
+    } else {
+      result["error"] = "App instance not available";
+      success = false;
+    }
   } else if (action == "ping") {
     success = true;
   } else {

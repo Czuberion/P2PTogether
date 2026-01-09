@@ -680,7 +680,7 @@ void App::setupUI() {
   m_mainWindow->show();
 
   if (m_testModeEnabled) {
-    m_testServer = new TestServer(m_mainWindow, m_testPort);
+    m_testServer = new TestServer(this, m_mainWindow, m_testPort);
     qInfo() << "Test server listening on port" << m_testServer->serverPort();
 
     // Notify that GUI is ready to receive test commands
@@ -779,6 +779,19 @@ void App::setActiveSessionDetails(const QString &sessionId,
 void App::clearActiveSessionDetails() {
   m_currentSessionId.clear();
   m_currentInviteCode.clear();
+}
+
+void App::addVideoToQueue(const QString &filePath) {
+  if (filePath.isEmpty() || !m_worker)
+    return;
+
+  client::ClientMsg clientMsg;
+  auto *cmd = clientMsg.mutable_queue_cmd();
+  cmd->set_type(client::p2p::QueueCmd_Type_APPEND);
+  cmd->set_file_path(filePath.toStdString());
+
+  qDebug() << "App::addVideoToQueue: Sending APPEND QueueCmd for" << filePath;
+  m_worker->send(clientMsg);
 }
 
 int App::getCurrentPlayingIndex() const {

@@ -62,6 +62,9 @@ public:
                                const QString &inviteCode);
   void clearActiveSessionDetails();
 
+  // Method to programmatically add video to queue (used by TestServer)
+  void addVideoToQueue(const QString &filePath);
+
 private slots:
   // Slot to confirm netThread has started
   void onNetThreadStarted();
