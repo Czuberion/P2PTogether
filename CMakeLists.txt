@@ -7,6 +7,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(CTest)
 
+# If vcpkg toolchain is not used (e.g. Qt Kit overrides it), manually add vcpkg paths
+if(WIN32 AND NOT CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg")
+    if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+        set(VCPKG_TARGET_TRIPLET "x64-mingw-dynamic" CACHE STRING "Vcpkg target triplet")
+    endif()
+    list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+    
+    # Explicitly set the protoc executable path to ensure it is found
+    set(_vcpkg_protoc "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}/tools/protobuf/protoc.exe")
+    if(EXISTS "${_vcpkg_protoc}")
+        set(Protobuf_PROTOC_EXECUTABLE "${_vcpkg_protoc}" CACHE FILEPATH "Protobuf compiler" FORCE)
+        message(STATUS "Forcing Protobuf_PROTOC_EXECUTABLE to: ${_vcpkg_protoc}")
+    else()
+        message(WARNING "Could not find protoc.exe at expected location: ${_vcpkg_protoc}")
+    endif()
+
+    message(STATUS "Manually added vcpkg prefix path: C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets OpenGLWidgets Network Test)
 if(TARGET Qt6::Test)
     get_target_property(QT_TEST_LOC Qt6::Test LOCATION)
@@ -14,8 +33,13 @@ if(TARGET Qt6::Test)
 else()
     message(WARNING "Qt6::Test target not found!")
 endif()
-find_package(Protobuf REQUIRED)
-find_package(gRPC REQUIRED)
+if(WIN32)
+    find_package(Protobuf CONFIG REQUIRED)
+    find_package(gRPC CONFIG REQUIRED)
+else()
+    find_package(Protobuf REQUIRED)
+    find_package(gRPC REQUIRED)
+endif()
 find_package(Doxygen QUIET)
 
 # --- Find MPV in a cross-platform way ----------------------------------------
@@ -25,15 +49,15 @@ if(PKG_CONFIG_FOUND)
 endif()
 
 find_path(MPV_INCLUDE_DIR mpv/client.h
-          HINTS ${PC_MPV_INCLUDE_DIRS} ENV MPV_DIR
+          HINTS ${PC_MPV_INCLUDE_DIRS} ${MPV_DIR} ENV MPV_DIR
           PATH_SUFFIXES include)
 
 find_library(MPV_LIBRARY NAMES mpv-2 mpv libmpv
-             HINTS ${PC_MPV_LIBRARY_DIRS} ENV MPV_DIR
+             HINTS ${PC_MPV_LIBRARY_DIRS} ${MPV_DIR} ENV MPV_DIR
              PATH_SUFFIXES lib lib64)
 
 find_library(MPV_IMPORT_LIBRARY NAMES mpv-2 mpv libmpv
-             HINTS ${PC_MPV_LIBRARY_DIRS} ENV MPV_DIR
+             HINTS ${PC_MPV_LIBRARY_DIRS} ${MPV_DIR} ENV MPV_DIR
              PATH_SUFFIXES lib lib64)
 
 if (MPV_INCLUDE_DIR AND MPV_IMPORT_LIBRARY)
@@ -44,7 +68,7 @@ if (MPV_INCLUDE_DIR AND MPV_IMPORT_LIBRARY)
         get_filename_component(_mpv_dir "${MPV_IMPORT_LIBRARY}" DIRECTORY)
         find_file(MPV_RUNTIME_DLL
                   NAMES libmpv-2.dll libmpv.dll mpv-2.dll
-                  HINTS "${_mpv_dir}" "${_mpv_dir}/../bin" ENV MPV_DIR
+                  HINTS "${_mpv_dir}" "${_mpv_dir}/../bin" ${MPV_DIR} ENV MPV_DIR
                   PATH_SUFFIXES bin
                   NO_DEFAULT_PATH)
         if (NOT MPV_RUNTIME_DLL)
@@ -126,8 +150,18 @@ set(HEADERS
 )
 
 # --- C++ gRPC/protobuf stub generation ---
-find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED) # Correct executable name
-find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+# Use imported executable targets from gRPC/Protobuf packages (vcpkg-friendly)
+if(TARGET gRPC::grpc_cpp_plugin)
+  get_target_property(GRPC_CPP_PLUGIN gRPC::grpc_cpp_plugin LOCATION)
+else()
+  find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+endif()
+
+if(TARGET protobuf::protoc)
+  get_target_property(PROTOC_EXECUTABLE protobuf::protoc LOCATION)
+else()
+  find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+endif()
 set(PROTO_ROOT "${CMAKE_SOURCE_DIR}/proto")
 set(CLIENT_PROTO "${PROTO_ROOT}/client.proto")
 set(CPP_CLIENT_PROTO_OUT_DIR "${CMAKE_SOURCE_DIR}/client/proto")
@@ -222,15 +256,22 @@ if (WIN32)
     #
     # --- 4. Add the post-build rule ------------------------------------------
     #
+    # Get compiler runtime directory (System MinGW)
+    get_filename_component(_compiler_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+
     add_custom_command(TARGET P2PTogether POST_BUILD
         # 4a) run windeployqt – this pulls in all Qt dlls, plugins, ICU, etc.
-        COMMAND "${QT_DEPLOY_TOOL}" ${_qt_conf} --compiler-runtime
+        # NOTE: Removed --compiler-runtime to prevent copying incompatible Qt SDK runtimes.
+        COMMAND "${QT_DEPLOY_TOOL}" ${_qt_conf} --verbose 1
+                --no-compiler-runtime
                 "$<TARGET_FILE:P2PTogether>"
 
-        # 4b) copy the exact mpv runtime we linked against
-        # COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        #         "${_mpv_dll}"
-        #         "$<TARGET_FILE_DIR:P2PTogether>"
+        # 4b) Manually copy the CORRECT compiler runtime (from the compiler used to build)
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_compiler_dir}/libstdc++-6.dll" "$<TARGET_FILE_DIR:P2PTogether>"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_compiler_dir}/libgcc_s_seh-1.dll" "$<TARGET_FILE_DIR:P2PTogether>"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_compiler_dir}/libwinpthread-1.dll" "$<TARGET_FILE_DIR:P2PTogether>"
+
+        # 4c) copy the exact mpv runtime we linked against
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "$<TARGET_FILE:MPV::mpv>"
                 "$<TARGET_FILE_DIR:P2PTogether>"
