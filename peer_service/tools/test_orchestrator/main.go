@@ -127,11 +127,11 @@ type Scenario struct {
 }
 
 type Step struct {
-	DelayMs    int64             `json:"delay_ms"`    // Delay from previous step completion in ms
-	AgentIndex int               `json:"agent_index"` // 0-based index in discovered list
-	Action     string            `json:"action"`
-	Args       map[string]string `json:"args"`
-	CaptureAs  string            `json:"capture_as,omitempty"` // Variable name to store response data
+	DelayMs      int64             `json:"delay_ms"`      // Delay from previous step completion in ms
+	AgentIndices []int             `json:"agent_indices"` // 0-based indices in discovered list (commands sent in parallel)
+	Action       string            `json:"action"`
+	Args         map[string]string `json:"args"`
+	CaptureAs    string            `json:"capture_as,omitempty"` // Variable name to store response data (only from first agent)
 }
 
 func (o *Orchestrator) RunScenario(path string) error {
@@ -155,19 +155,50 @@ func (o *Orchestrator) RunScenario(path string) error {
 
 	log.Printf("Starting scenario with %d steps across %d agents", len(scenario.Steps), len(agentIDs))
 
-	for _, step := range scenario.Steps {
+	for stepNum, step := range scenario.Steps {
 		// Wait relative to previous step
 		time.Sleep(time.Duration(step.DelayMs) * time.Millisecond)
 
-		if step.AgentIndex >= len(agentIDs) {
-			log.Printf("Skipping step: Agent index %d out of range", step.AgentIndex)
+		if len(step.AgentIndices) == 0 {
+			log.Printf("Skipping step %d: No agent indices specified", stepNum)
 			continue
 		}
-		agentID := agentIDs[step.AgentIndex]
 
-		// Execute step
-		if err := o.SendCommand(agentID, step.Action, step.Args, step.CaptureAs); err != nil {
-			return fmt.Errorf("step failed: %v", err)
+		// Execute commands to all targeted agents in parallel
+		var wg sync.WaitGroup
+		errChan := make(chan error, len(step.AgentIndices))
+
+		for i, agentIdx := range step.AgentIndices {
+			if agentIdx >= len(agentIDs) {
+				log.Printf("Skipping agent index %d in step %d: out of range", agentIdx, stepNum)
+				continue
+			}
+
+			wg.Add(1)
+			// Only capture from the first agent in the list
+			captureAs := ""
+			if i == 0 {
+				captureAs = step.CaptureAs
+			}
+
+			go func(agentID string, captureVar string) {
+				defer wg.Done()
+				if err := o.SendCommand(agentID, step.Action, step.Args, captureVar); err != nil {
+					errChan <- fmt.Errorf("agent %s: %v", agentID, err)
+				}
+			}(agentIDs[agentIdx], captureAs)
+		}
+
+		wg.Wait()
+		close(errChan)
+
+		// Collect any errors
+		var errs []string
+		for err := range errChan {
+			errs = append(errs, err.Error())
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("step %d failed: %s", stepNum, strings.Join(errs, "; "))
 		}
 	}
 

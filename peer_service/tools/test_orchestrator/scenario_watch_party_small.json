@@ -1,0 +1,190 @@
+{
+  "description": "Watch Party (Small): 1 host + 2 viewers streaming video",
+  "steps": [
+    {
+      "description": "Start host GUI",
+      "delay_ms": 1000,
+      "agent_indices": [0],
+      "action": "start_gui",
+      "args": { "bin_path": "" }
+    },
+    {
+      "description": "Wait for host GUI ready",
+      "delay_ms": 500,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"gui_ready\", \"timeout_ms\": 60000}}" 
+      }
+    },
+    {
+      "description": "Host opens create session dialog",
+      "delay_ms": 500,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"trigger_menu\", \"args\": {\"menu\": \"Session\", \"action\": \"Create Session\"}}" 
+      }
+    },
+    {
+      "description": "Host enters session name",
+      "delay_ms": 5000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"sessionNameInput\", \"text\": \"Watch Party\"}}" 
+      }
+    },
+    {
+      "description": "Host enters username",
+      "delay_ms": 1000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"usernameInput\", \"text\": \"Host\"}}" 
+      }
+    },
+    {
+      "description": "Host confirms session creation",
+      "delay_ms": 2000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"createSessionBtnBox\", \"button\": \"Ok\"}}" 
+      }
+    },
+    {
+      "description": "Wait for session to be created",
+      "delay_ms": 500,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"session_created\", \"timeout_ms\": 120000}}" 
+      },
+      "capture_as": "session_info"
+    },
+    {
+      "description": "Capture invite code from dialog",
+      "delay_ms": 1000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"get_text\", \"args\": {\"widget\": \"inviteCodeLabel\"}}" 
+      },
+      "capture_as": "invite_code"
+    },
+    {
+      "description": "Host dismisses session info dialog",
+      "delay_ms": 1000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"sessionInfoBtnBox\", \"button\": \"Ok\"}}" 
+      }
+    },
+    {
+      "description": "Start both viewer GUIs in parallel",
+      "delay_ms": 2000,
+      "agent_indices": [1, 2],
+      "action": "start_gui",
+      "args": { "bin_path": "" }
+    },
+    {
+      "description": "Wait for viewer GUIs to be ready",
+      "delay_ms": 500,
+      "agent_indices": [1, 2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"gui_ready\", \"timeout_ms\": 120000}}" 
+      }
+    },
+    {
+      "description": "All viewers open join session dialog",
+      "delay_ms": 1000,
+      "agent_indices": [1, 2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"trigger_menu\", \"args\": {\"menu\": \"Session\", \"action\": \"Join Session\"}}" 
+      }
+    },
+    {
+      "description": "All viewers enter invite code",
+      "delay_ms": 5000,
+      "agent_indices": [1, 2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"inviteCodeInput\", \"text\": \"${invite_code}\"}}" 
+      }
+    },
+    {
+      "description": "Viewer 1 enters username",
+      "delay_ms": 1000,
+      "agent_indices": [1],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"joinUsernameInput\", \"text\": \"Viewer1\"}}" 
+      }
+    },
+    {
+      "description": "Viewer 2 enters username",
+      "delay_ms": 100,
+      "agent_indices": [2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"joinUsernameInput\", \"text\": \"Viewer2\"}}" 
+      }
+    },
+    {
+      "description": "All viewers confirm join",
+      "delay_ms": 2000,
+      "agent_indices": [1, 2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"joinSessionBtnBox\", \"button\": \"Ok\"}}" 
+      }
+    },
+    {
+      "description": "All viewers wait for session join confirmation",
+      "delay_ms": 500,
+      "agent_indices": [1, 2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"session_joined\", \"timeout_ms\": 180000}}" 
+      }
+    },
+    {
+      "description": "All viewers dismiss session info dialog",
+      "delay_ms": 1000,
+      "agent_indices": [1, 2],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"sessionInfoBtnBox\", \"button\": \"Ok\"}}" 
+      }
+    },
+    {
+      "description": "Host adds video to queue",
+      "delay_ms": 3000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"add_video_to_queue\", \"args\": {\"path\": \"test_vid0.mp4\"}}" 
+      }
+    },
+    {
+      "description": "Wait for streaming to complete",
+      "delay_ms": 20000,
+      "agent_indices": [0],
+      "action": "gui_command",
+      "args": { 
+        "payload": "{\"action\": \"ping\", \"args\": {}}" 
+      }
+    },
+    {
+      "description": "Stop all GUIs in parallel",
+      "delay_ms": 2000,
+      "agent_indices": [0, 1, 2],
+      "action": "stop_gui",
+      "args": {}
+    }
+  ]
+}

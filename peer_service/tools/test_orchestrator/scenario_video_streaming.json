@@ -2,13 +2,13 @@
   "steps": [
     {
       "delay_ms": 1000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "start_gui",
       "args": { "bin_path": "" }
     },
     {
       "delay_ms": 500,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"gui_ready\", \"timeout_ms\": 60000}}" 
@@ -16,7 +16,7 @@
     },
     {
       "delay_ms": 500,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"trigger_menu\", \"args\": {\"menu\": \"Session\", \"action\": \"Create Session\"}}" 
@@ -24,7 +24,7 @@
     },
     {
       "delay_ms": 5000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"sessionNameInput\", \"text\": \"Streaming Test\"}}" 
@@ -32,7 +32,7 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"usernameInput\", \"text\": \"Host\"}}" 
@@ -40,7 +40,7 @@
     },
     {
       "delay_ms": 2000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"createSessionBtnBox\", \"button\": \"Ok\"}}" 
@@ -48,7 +48,7 @@
     },
     {
       "delay_ms": 500,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"session_created\", \"timeout_ms\": 120000}}" 
@@ -57,7 +57,7 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"get_text\", \"args\": {\"widget\": \"inviteCodeLabel\"}}" 
@@ -66,7 +66,7 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"sessionInfoBtnBox\", \"button\": \"Ok\"}}" 
@@ -74,13 +74,13 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "start_gui",
       "args": { "bin_path": "" }
     },
     {
       "delay_ms": 500,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"gui_ready\", \"timeout_ms\": 60000}}" 
@@ -88,7 +88,7 @@
     },
     {
       "delay_ms": 500,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"trigger_menu\", \"args\": {\"menu\": \"Session\", \"action\": \"Join Session\"}}" 
@@ -96,7 +96,7 @@
     },
     {
       "delay_ms": 5000,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"inviteCodeInput\", \"text\": \"${invite_code}\"}}" 
@@ -104,7 +104,7 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"type\", \"args\": {\"widget\": \"joinUsernameInput\", \"text\": \"Joiner\"}}" 
@@ -112,7 +112,7 @@
     },
     {
       "delay_ms": 2000,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"joinSessionBtnBox\", \"button\": \"Ok\"}}" 
@@ -120,7 +120,7 @@
     },
     {
       "delay_ms": 500,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"wait_for_event\", \"args\": {\"event\": \"session_joined\", \"timeout_ms\": 120000}}" 
@@ -128,7 +128,7 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"click_dialog_button\", \"args\": {\"widget\": \"sessionInfoBtnBox\", \"button\": \"Ok\"}}" 
@@ -136,7 +136,7 @@
     },
     {
       "delay_ms": 2000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"add_video_to_queue\", \"args\": {\"path\": \"test_vid0.mp4\"}}" 
@@ -144,7 +144,7 @@
     },
     {
       "delay_ms": 13000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "gui_command",
       "args": { 
           "payload": "{\"action\": \"ping\", \"args\": {}}" 
@@ -152,13 +152,13 @@
     },
     {
       "delay_ms": 1000,
-      "agent_index": 0,
+      "agent_indices": [0],
       "action": "stop_gui",
       "args": {}
     },
     {
       "delay_ms": 1000,
-      "agent_index": 1,
+      "agent_indices": [1],
       "action": "stop_gui",
       "args": {}
     }
