@@ -72,6 +72,10 @@ type server struct {
 	routingDiscovery *drouting.RoutingDiscovery // Use the concrete type
 
 	triggerHLSDircontinuity func()
+
+	// mDNS configuration
+	mdnsEnabled bool
+	mdnsStarted bool
 }
 
 func (s *server) GetServiceInfo(ctx context.Context, _ *emptypb.Empty) (*clientpb.ServiceInfo, error) {
@@ -296,6 +300,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				s.chatTopic = s.node.ChatTopic()
 			}
 
+			// Start mDNS discovery for local network peer discovery
+			s.maybeStartMdns()
+
 			// Send an updated LocalPeerIdentity for the admin now that they are in a session with a username
 			s.sendInitialState(stream) // Or a more targeted LocalPeerIdentity update
 			log.Printf("TODO: Persist session %s for Admin %s (SR-SM-2)", createdSession.ID, nodeIDStr)
@@ -318,6 +325,9 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			if req.Username != nil {
 				joiningUsername = *req.Username
 			}
+
+			// Start mDNS discovery early to help find session admin on local network
+			s.maybeStartMdns()
 
 			log.Printf("Attempting DHT FindPeers for session: %s with enhanced discovery timing", sessionIDToJoin)
 			log.Printf("Our peer ID: %s", s.node.ID())
@@ -1231,17 +1241,21 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 	log.Printf("[mDNS] discovered %s with addrs: %v\n", pi.ID, pi.Addrs)
 
+	// Always add addresses to peerstore so they're available for later connection attempts.
+	// This is crucial: even if the immediate connect fails (e.g., due to TLS race conditions),
+	// these LAN addresses will be available when we try to connect during session join.
+	n.h.Peerstore().AddAddrs(pi.ID, pi.Addrs, time.Hour*24)
+	log.Printf("[mDNS] added %d addresses for peer %s to peerstore\n", len(pi.Addrs), pi.ID)
+
 	// Attempt to connect to the peer.
 	// DHT bootstrap will happen after connection if it's a new peer.
 	go func() {
 		log.Printf("[mDNS] Attempting to connect to %s", pi.ID)
 		if err := n.h.Connect(context.Background(), pi); err != nil {
 			log.Printf("[mDNS] dial %s failed: %v", pi.ID, err)
+			// Connection failed, but addresses are still in peerstore for later use
 		} else {
 			log.Printf("[mDNS] successfully connected to %s", pi.ID)
-			// If using DHT and connection is successful, DHT will naturally learn about this peer.
-			// Explicitly adding to DHT's peerstore might not be necessary if AutoRelay/AutoNAT services are active
-			// and the peer is routable, or if a bootstrap process runs.
 		}
 	}()
 }
@@ -1334,7 +1348,25 @@ func startMdnsDiscovery(h host.Host, dht *dht.IpfsDHT) {
 	mdnsSvc := mdns.NewMdnsService(h, "p2ptogether-mdns", &mdnsNotifee{h: h, dht: dht})
 	if err := mdnsSvc.Start(); err != nil {
 		log.Printf("mDNS start failed: %v (continuing without mDNS)", err)
+	} else {
+		log.Println("[mDNS] Local network discovery started")
 	}
+}
+
+// maybeStartMdns starts mDNS discovery if enabled and not already started.
+// Should be called when creating or joining a session.
+func (s *server) maybeStartMdns() {
+	log.Printf("[mDNS] maybeStartMdns called: enabled=%v, alreadyStarted=%v", s.mdnsEnabled, s.mdnsStarted)
+	if !s.mdnsEnabled {
+		log.Println("[mDNS] Disabled via --no-mdns flag, skipping")
+		return
+	}
+	if s.mdnsStarted {
+		log.Println("[mDNS] Already started, skipping")
+		return // Already running
+	}
+	s.mdnsStarted = true
+	startMdnsDiscovery(s.node, s.dht) // Node embeds host.Host
 }
 
 // processControlTopicMessages handles all incoming ServerMsg messages from the ctrlTopic.
@@ -1651,6 +1683,8 @@ func main() {
 	flag.IntVar(&grpcPort, "grpc-port", 0, "gRPC listen port")
 	var initialRolesStr string
 	flag.StringVar(&initialRolesStr, "roles", "Admin", "Initial roles for this node (comma-separated, e.g., 'Streamer,Viewer')")
+	var noMdns bool
+	flag.BoolVar(&noMdns, "no-mdns", false, "Disable mDNS local network discovery (enabled by default)")
 	flag.Parse()
 
 	// Make ffmpeg discoverable when bundled with the application.
@@ -1722,7 +1756,7 @@ func main() {
 	// 3) libp2p + GossipSub
 	lhost, kadDHT, routingDiscovery := buildHost(ctx)
 	ps, err := pubsub.NewGossipSub(ctx, lhost)
-	// startMdnsDiscovery(lhost, kadDHT)
+	// mDNS is started lazily on session create/join, not at startup
 	if err != nil {
 		log.Fatalf("GossipSub init failed: %v", err)
 	}
@@ -1767,6 +1801,7 @@ func main() {
 		roleManager:             roleManager,
 		routingDiscovery:        routingDiscovery,
 		triggerHLSDircontinuity: triggerDiscontinuity,
+		mdnsEnabled:             !noMdns,
 	}
 	clientpb.RegisterP2PTClientServer(grpcServer, srvInstance)
 
