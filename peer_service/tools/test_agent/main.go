@@ -21,15 +21,19 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 )
 
 const (
 	AgentProtocolID    = "/p2ptogether-test/agent/1.0.0"
 	MdnsServiceTag     = "_p2ptogether-test._tcp"
+	DHTRendezvous      = "p2ptogether-test-agents"
 	DefaultGuiTestPort = 19999
 )
 
@@ -46,10 +50,15 @@ type Agent struct {
 func main() {
 	port := flag.Int("port", 0, "libp2p listen port (0 for random)")
 	guiBin := flag.String("gui", "./P2PTogether", "Path to P2PTogether executable")
+	useDHT := flag.Bool("dht", false, "Enable DHT-based discovery (for networks that block mDNS)")
+	noMdns := flag.Bool("no-mdns", false, "Disable mDNS discovery (useful for testing DHT-only)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	log.Println("=== Test Agent Starting ===")
+	log.Printf("Configuration: port=%d, gui=%s, dht=%v, no-mdns=%v", *port, *guiBin, *useDHT, *noMdns)
 
 	// 1. Create libp2p host
 	h, err := libp2p.New(
@@ -58,7 +67,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Test Agent started. Peer ID: %s. Listening on: %v", h.ID(), h.Addrs())
+	log.Printf("Test Agent started. Peer ID: %s", h.ID())
+	log.Printf("Listening addresses:")
+	for _, addr := range h.Addrs() {
+		log.Printf("  - %s/p2p/%s", addr, h.ID())
+	}
 
 	agent := &Agent{
 		Host:           h,
@@ -68,16 +81,33 @@ func main() {
 		DefaultBinPath: *guiBin,
 	}
 
-	// 2. Setup mDNS discovery (Advertising)
-	if err := setupMDNS(h, MdnsServiceTag); err != nil {
-		log.Fatal("Failed to setup mDNS:", err)
+	// 2. Setup mDNS discovery (Advertising) - unless disabled
+	if !*noMdns {
+		if err := setupMDNS(h, MdnsServiceTag); err != nil {
+			log.Printf("[mDNS] Warning: setup failed: %v (continuing without mDNS)", err)
+		} else {
+			log.Println("[mDNS] Advertising started on service tag:", MdnsServiceTag)
+		}
+	} else {
+		log.Println("[mDNS] Disabled via --no-mdns flag")
 	}
-	log.Println("mDNS advertising started.")
 
-	// 3. Set stream handler for orchestrator commands
+	// 3. Setup DHT discovery if enabled
+	if *useDHT {
+		if err := setupDHT(ctx, h); err != nil {
+			log.Printf("[DHT] Warning: setup failed: %v", err)
+		}
+	} else {
+		log.Println("[DHT] Disabled (use --dht to enable)")
+	}
+
+	// 4. Set stream handler for orchestrator commands
 	h.SetStreamHandler(AgentProtocolID, agent.handleStream)
+	log.Printf("Stream handler registered for protocol: %s", AgentProtocolID)
 
-	// 4. Wait for shutdown signal
+	log.Println("=== Agent Ready - Waiting for Orchestrator ===")
+
+	// 5. Wait for shutdown signal
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
@@ -92,14 +122,84 @@ func setupMDNS(h host.Host, serviceTag string) error {
 	return s.Start()
 }
 
+func setupDHT(ctx context.Context, h host.Host) error {
+	log.Println("[DHT] Initializing Kademlia DHT...")
+
+	// Create DHT in server mode
+	kademliaDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer))
+	if err != nil {
+		return fmt.Errorf("failed to create DHT: %v", err)
+	}
+
+	// Connect to bootstrap peers
+	log.Println("[DHT] Connecting to bootstrap peers...")
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successCount := 0
+	totalPeers := len(dht.DefaultBootstrapPeers)
+
+	for _, peerAddr := range dht.DefaultBootstrapPeers {
+		peerInfo, err := peer.AddrInfoFromP2pAddr(peerAddr)
+		if err != nil {
+			log.Printf("[DHT] Failed to parse bootstrap peer %s: %v", peerAddr, err)
+			continue
+		}
+		wg.Add(1)
+		go func(pi peer.AddrInfo) {
+			defer wg.Done()
+			connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := h.Connect(connectCtx, pi); err != nil {
+				log.Printf("[DHT] Failed to connect to bootstrap peer %s: %v", pi.ID.String()[:16], err)
+			} else {
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+				log.Printf("[DHT] Connected to bootstrap peer: %s", pi.ID.String()[:16])
+			}
+		}(*peerInfo)
+	}
+	wg.Wait()
+	log.Printf("[DHT] Bootstrap connections: %d/%d successful", successCount, totalPeers)
+
+	if successCount == 0 {
+		return fmt.Errorf("failed to connect to any bootstrap peers")
+	}
+
+	// Bootstrap the DHT
+	log.Println("[DHT] Bootstrapping routing table...")
+	if err := kademliaDHT.Bootstrap(ctx); err != nil {
+		return fmt.Errorf("DHT bootstrap failed: %v", err)
+	}
+
+	// Wait for routing table to populate
+	log.Println("[DHT] Waiting for routing table to populate...")
+	time.Sleep(3 * time.Second)
+	routingTableSize := kademliaDHT.RoutingTable().Size()
+	log.Printf("[DHT] Routing table size: %d peers", routingTableSize)
+
+	// Advertise ourselves
+	routingDiscovery := drouting.NewRoutingDiscovery(kademliaDHT)
+	log.Printf("[DHT] Advertising on rendezvous: %s", DHTRendezvous)
+	dutil.Advertise(ctx, routingDiscovery, DHTRendezvous)
+	log.Println("[DHT] Advertisement started - agent is now discoverable via DHT")
+
+	return nil
+}
+
 type noopNotifee struct{}
 
 func (n *noopNotifee) HandlePeerFound(pi peer.AddrInfo) {}
 
 // handleStream handles commands from the orchestrator
 func (a *Agent) handleStream(s network.Stream) {
-	log.Printf("New stream from %s", s.Conn().RemotePeer())
-	defer s.Close()
+	remotePeer := s.Conn().RemotePeer()
+	log.Printf("[Stream] New connection from orchestrator: %s", remotePeer.String()[:16])
+	log.Printf("[Stream] Remote address: %s", s.Conn().RemoteMultiaddr())
+	defer func() {
+		s.Close()
+		log.Printf("[Stream] Connection closed from: %s", remotePeer.String()[:16])
+	}()
 
 	reader := bufio.NewReader(s)
 	writer := bufio.NewWriter(s)
@@ -108,16 +208,19 @@ func (a *Agent) handleStream(s network.Stream) {
 		// Read command (JSON Line)
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			log.Println("Stream closed or error:", err)
+			if err.Error() != "EOF" {
+				log.Printf("[Stream] Read error: %v", err)
+			}
 			return
 		}
 
-		log.Printf("Received command: %s", line)
+		log.Printf("[Command] Received: %s", strings.TrimSpace(line))
 		response := a.processCommand(line)
 
 		// Send response
 		writer.WriteString(response + "\n")
 		writer.Flush()
+		log.Printf("[Command] Response sent: %s", strings.TrimSpace(response))
 	}
 }
 
@@ -218,7 +321,7 @@ func (a *Agent) StartGUI(binPath string) error {
 		return fmt.Errorf("failed to create stderr pipe: %v", err)
 	}
 
-	log.Printf("Starting GUI: %s --test-mode --test-port=0", binPath)
+	log.Printf("[GUI] Starting: %s --test-mode --test-port=0", binPath)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -234,7 +337,7 @@ func (a *Agent) StartGUI(binPath string) error {
 		scanner := bufio.NewScanner(reader)
 		for scanner.Scan() {
 			line := scanner.Text()
-			fmt.Printf("[%s] %s\n", name, line) // Echo to console with label
+			fmt.Printf("[GUI/%s] %s\n", name, line) // Echo to console with label
 			if matches := portPattern.FindStringSubmatch(line); len(matches) > 1 {
 				if port, err := strconv.Atoi(matches[1]); err == nil {
 					select {
@@ -253,9 +356,9 @@ func (a *Agent) StartGUI(binPath string) error {
 	select {
 	case port := <-portChan:
 		a.GUIPort = port
-		log.Printf("Discovered GUI test server on port %d", port)
+		log.Printf("[GUI] Test server discovered on port %d", port)
 	case <-time.After(30 * time.Second):
-		log.Printf("Warning: Could not discover GUI test port, using default %d", DefaultGuiTestPort)
+		log.Printf("[GUI] Warning: Could not discover test port, using default %d", DefaultGuiTestPort)
 		a.GUIPort = DefaultGuiTestPort
 	}
 
@@ -270,7 +373,7 @@ func (a *Agent) StopGUI() error {
 		return nil
 	}
 
-	log.Println("Stopping GUI...")
+	log.Println("[GUI] Stopping...")
 	if err := a.GUIProcess.Process.Signal(syscall.SIGTERM); err != nil {
 		// Fallback to Kill
 		a.GUIProcess.Process.Kill()
@@ -278,6 +381,7 @@ func (a *Agent) StopGUI() error {
 	// Wait releases resources
 	a.GUIProcess.Wait()
 	a.GUIProcess = nil
+	log.Println("[GUI] Stopped")
 	return nil
 }
 
@@ -297,7 +401,7 @@ func (a *Agent) SendGUICommand(payload string) (string, error) {
 	}
 	defer conn.Close()
 
-	log.Printf("Sending to GUI: %s", payload)
+	log.Printf("[GUI] Sending command: %s", payload)
 	_, err = fmt.Fprintf(conn, "%s\n", payload)
 	if err != nil {
 		return "", err
@@ -322,7 +426,7 @@ func (a *Agent) SendGUICommand(payload string) (string, error) {
 			} else {
 				readTimeout = 125 * time.Second
 			}
-			log.Printf("wait_for_event detected, using timeout: %v", readTimeout)
+			log.Printf("[GUI] wait_for_event detected, using timeout: %v", readTimeout)
 		}
 	}
 
@@ -334,13 +438,13 @@ func (a *Agent) SendGUICommand(payload string) (string, error) {
 	if err != nil {
 		// Timeout or EOF is expected for commands that trigger modal dialogs (except wait_for_event)
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			log.Printf("Read timeout (expected for modal dialogs)")
+			log.Printf("[GUI] Read timeout (expected for modal dialogs)")
 			return "", nil
 		}
-		log.Printf("Warning: no response from GUI: %v", err)
+		log.Printf("[GUI] Warning: no response: %v", err)
 		return "", nil // Not an error - GUI might not respond
 	}
-	log.Printf("Response from GUI: %s", respLine)
+	log.Printf("[GUI] Response: %s", strings.TrimSpace(respLine))
 	return strings.TrimSpace(respLine), nil
 }
 
