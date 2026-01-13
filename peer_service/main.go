@@ -26,6 +26,8 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
+	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -329,6 +331,12 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			// Start mDNS discovery early to help find session admin on local network
 			s.maybeStartMdns()
 
+			// Give mDNS a brief window to discover local peers before DHT lookup.
+			// This helps when both peers are on the same LAN - mDNS will add local
+			// addresses to the peerstore that we can use if DHT returns only public IPs.
+			log.Printf("Waiting briefly for mDNS to discover local peers...")
+			time.Sleep(2 * time.Second)
+
 			log.Printf("Attempting DHT FindPeers for session: %s with enhanced discovery timing", sessionIDToJoin)
 			log.Printf("Our peer ID: %s", s.node.ID())
 			log.Printf("Our external addresses: %v", s.node.Addrs())
@@ -629,7 +637,32 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			// ENHANCED CONNECTION ESTABLISHMENT WITH NAT TRAVERSAL
 			log.Printf("=== ENHANCED CONNECTION ESTABLISHMENT ===")
 			log.Printf("Attempting to connect to Admin %s for session %s", adminInfo.ID, sessionIDToJoin)
-			log.Printf("Admin multiaddresses: %v", adminInfo.Addrs)
+			log.Printf("Admin multiaddresses from DHT: %v", adminInfo.Addrs)
+
+			// Merge peerstore addresses (from mDNS) with DHT-discovered addresses.
+			// This is crucial when both peers are on the same LAN - DHT may only return
+			// the public NAT IP, but mDNS will have added the local LAN addresses.
+			peerstoreAddrs := s.node.Peerstore().Addrs(adminInfo.ID)
+			if len(peerstoreAddrs) > 0 {
+				log.Printf("Found %d additional addresses in peerstore for admin %s: %v",
+					len(peerstoreAddrs), adminInfo.ID, peerstoreAddrs)
+				// Merge and dedupe addresses
+				addrSet := make(map[string]struct{})
+				for _, addr := range adminInfo.Addrs {
+					addrSet[addr.String()] = struct{}{}
+				}
+				for _, addr := range peerstoreAddrs {
+					if _, exists := addrSet[addr.String()]; !exists {
+						adminInfo.Addrs = append(adminInfo.Addrs, addr)
+						addrSet[addr.String()] = struct{}{}
+					}
+				}
+			}
+
+			// Sort addresses to prioritize local/private IPs over public IPs.
+			// This helps when both peers are on the same LAN behind NAT.
+			adminInfo.Addrs = sortAddressesLocalFirst(adminInfo.Addrs)
+			log.Printf("Admin multiaddresses after merge and sort: %v", adminInfo.Addrs)
 
 			// Check our current connectivity status
 			log.Printf("Our host connectivity: %s", s.node.Network().Connectedness(adminInfo.ID))
@@ -1367,6 +1400,29 @@ func (s *server) maybeStartMdns() {
 	}
 	s.mdnsStarted = true
 	startMdnsDiscovery(s.node, s.dht) // Node embeds host.Host
+}
+
+// sortAddressesLocalFirst sorts multiaddresses to prioritize private/local IP addresses
+// over public IPs. This helps when both peers are on the same LAN behind NAT - we want
+// to try the local addresses first since the public NAT IP may not be reachable.
+func sortAddressesLocalFirst(addrs []ma.Multiaddr) []ma.Multiaddr {
+	localAddrs := make([]ma.Multiaddr, 0)
+	publicAddrs := make([]ma.Multiaddr, 0)
+
+	for _, addr := range addrs {
+		// Check if this is a private/local address
+		if manet.IsPrivateAddr(addr) {
+			localAddrs = append(localAddrs, addr)
+		} else {
+			publicAddrs = append(publicAddrs, addr)
+		}
+	}
+
+	// Return local addresses first, then public addresses
+	result := make([]ma.Multiaddr, 0, len(addrs))
+	result = append(result, localAddrs...)
+	result = append(result, publicAddrs...)
+	return result
 }
 
 // processControlTopicMessages handles all incoming ServerMsg messages from the ctrlTopic.
