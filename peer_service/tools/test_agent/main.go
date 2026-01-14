@@ -28,6 +28,8 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
+	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 const (
@@ -149,6 +151,10 @@ func setupDHT(ctx context.Context, h host.Host) error {
 			defer wg.Done()
 			connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
+
+			// Sort addresses to prioritize local private ones (fixes NAT hairpinning)
+			pi.Addrs = sortAddressesLocalFirst(pi.Addrs)
+
 			if err := h.Connect(connectCtx, pi); err != nil {
 				log.Printf("[DHT] Failed to connect to bootstrap peer %s: %v", pi.ID.String()[:16], err)
 			} else {
@@ -464,4 +470,22 @@ func errorResponse(msg string) string {
 	r := Response{Status: "error", Error: msg}
 	b, _ := json.Marshal(r)
 	return string(b)
+}
+
+// Helper to prioritize local/private addresses
+func sortAddressesLocalFirst(addrs []ma.Multiaddr) []ma.Multiaddr {
+	// We want to try local addresses first, then public ones.
+	// This helps when both peers are on the same LAN behind a NAT that doesn't support hairpinning.
+	var local, public []ma.Multiaddr
+
+	for _, addr := range addrs {
+		if manet.IsPrivateAddr(addr) {
+			local = append(local, addr)
+		} else {
+			public = append(public, addr)
+		}
+	}
+
+	// Combine local + public
+	return append(local, public...)
 }

@@ -20,6 +20,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 const (
@@ -119,7 +121,10 @@ func main() {
 	for id, pi := range orch.Agents {
 		shortID := id[:16]
 		log.Printf("[Connect] Attempting connection to agent %s...", shortID)
-		log.Printf("[Connect] Agent addresses: %v", pi.Addrs)
+		// Sort addresses to prioritize local/private ones (fixes NAT hairpinning issues)
+		sortedAddrs := sortAddressesLocalFirst(pi.Addrs)
+		pi.Addrs = sortedAddrs
+		log.Printf("[Connect] Agent addresses (sorted): %v", pi.Addrs)
 
 		connectStart := time.Now()
 		if err := h.Connect(ctx, pi); err != nil {
@@ -476,4 +481,22 @@ func (o *Orchestrator) reconnectAgent(agentID string) error {
 	o.AgentStreams[agentID] = s
 	log.Printf("[Reconnect] Stream reopened to agent %s", shortID)
 	return nil
+}
+
+// Helper to prioritize local/private addresses
+func sortAddressesLocalFirst(addrs []ma.Multiaddr) []ma.Multiaddr {
+	// We want to try local addresses first, then public ones.
+	// This helps when both peers are on the same LAN behind a NAT that doesn't support hairpinning.
+	var local, public []ma.Multiaddr
+
+	for _, addr := range addrs {
+		if manet.IsPrivateAddr(addr) {
+			local = append(local, addr)
+		} else {
+			public = append(public, addr)
+		}
+	}
+
+	// Combine local + public
+	return append(local, public...)
 }
