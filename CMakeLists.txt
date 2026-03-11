@@ -114,8 +114,8 @@ if(WIN32)
     add_compile_definitions(_DISABLE_CONSTINIT_INITIALIZERS)
 endif()
 
-# Set all binary outputs to build/bin
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Set all binary outputs to build/bin/$<CONFIG>
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/$<CONFIG>)
 
 set(SOURCES
     client/main.cpp
@@ -336,26 +336,40 @@ endif()
 # --- Go service build target ---
 find_program(GO_EXECUTABLE go REQUIRED)
 
+
 # -------------------------------------------------------------
 #  Generate a throw‑away Go workspace at *source‑root*
 #  ------------------------------------------------------------
 set(GO_WORK_FILE "${CMAKE_SOURCE_DIR}/go.work")
 
-add_custom_command(
-    OUTPUT  ${GO_WORK_FILE}
-    # 1) nuke any stale workspace
-    COMMAND ${CMAKE_COMMAND} -E rm -f ${GO_WORK_FILE}
-    # 2) recreate it pointing at our two modules
-    COMMAND ${GO_EXECUTABLE} work init
-            "${CMAKE_SOURCE_DIR}/peer_service"
-            "${CMAKE_SOURCE_DIR}/tests/go"
-    # 3) keep it up‑to‑date if we ever change dependencies
-    COMMAND ${GO_EXECUTABLE} work sync
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Regenerating temporary go.work workspace at repo root"
-    VERBATIM)
+# Dynamically find which modules actually exist so we don't break go.work
+set(GO_WORK_MODULES "")
+if(EXISTS "${CMAKE_SOURCE_DIR}/peer_service")
+    list(APPEND GO_WORK_MODULES "${CMAKE_SOURCE_DIR}/peer_service")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/go")
+    list(APPEND GO_WORK_MODULES "${CMAKE_SOURCE_DIR}/tests/go")
+endif()
 
-add_custom_target(go_workspace ALL DEPENDS ${GO_WORK_FILE})
+# We only create the workspace if we actually found modules
+if(GO_WORK_MODULES)
+    add_custom_command(
+        OUTPUT  ${GO_WORK_FILE}
+        # 1) nuke any stale workspace
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${GO_WORK_FILE}
+        # 2) recreate it pointing at the discovered modules
+        COMMAND ${GO_EXECUTABLE} work init ${GO_WORK_MODULES}
+        # 3) keep it up‑to‑date if we ever change dependencies
+        COMMAND ${GO_EXECUTABLE} work sync
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Regenerating temporary go.work workspace at repo root"
+        VERBATIM)
+
+    add_custom_target(go_workspace ALL DEPENDS ${GO_WORK_FILE})
+else()
+    # Dummy target if no modules exist
+    add_custom_target(go_workspace ALL)
+endif()
 
 # ---------------- Go vet / unit tests ----------------
 enable_testing()
@@ -415,7 +429,7 @@ set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
 set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
 # set(GO_SERVICE_BIN ${CMAKE_BINARY_DIR}/bin/peer_service)
 set(GO_SERVICE_BIN
-    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
+    "${CMAKE_CURRENT_BINARY_DIR}/bin/peer_service_temp/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
 set(GO_MOD_FILE ${GO_SERVICE_DIR}/go.mod)
 
 # Ensure bin directory exists
@@ -433,7 +447,7 @@ file(GLOB_RECURSE GO_SERVICE_SRCS
      ${GO_SERVICE_DIR}/*.go)
 
 add_custom_target(peer_service ALL
-    DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE} generate_go_client_proto
+    DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE} go_workspace generate_go_client_proto
     COMMAND ${GO_EXECUTABLE} mod tidy
     COMMAND ${GO_EXECUTABLE} build
             -o "${GO_SERVICE_BIN}"
@@ -481,3 +495,10 @@ endif()
 add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc)
 add_dependencies(P2PTogether generate_cpp_client_proto)
 add_dependencies(P2PTogether peer_service)
+
+add_custom_command(TARGET P2PTogether POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GO_SERVICE_BIN}"
+            "$<TARGET_FILE_DIR:P2PTogether>"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_CURRENT_BINARY_DIR}/bin/peer_service_temp"
+    COMMENT "Copying peer_service executable to output directory and cleaning temp dir")
