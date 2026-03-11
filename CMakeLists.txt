@@ -429,25 +429,16 @@ set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
 set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
 set(GO_SERVICE_BIN
     "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
-set(GO_MOD_FILE ${GO_SERVICE_DIR}/go.mod)
 
 # Ensure bin directory exists
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
-add_custom_command(
-  OUTPUT ${GO_MOD_FILE}
-  COMMAND ${GO_EXECUTABLE} mod init p2ptogether/peer_service || exit 0
-  WORKING_DIRECTORY ${GO_SERVICE_DIR}
-  COMMENT "Initializing Go module for peer_service (if needed)"
-  VERBATIM
-)
 
 file(GLOB_RECURSE GO_SERVICE_SRCS
      ${GO_SERVICE_DIR}/*.go)
 
 add_custom_command(
     OUTPUT "${GO_SERVICE_BIN}"
-    DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE}
+    DEPENDS ${GO_SERVICE_SRCS}
             ${GO_WORK_FILE}
             ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
     COMMAND ${GO_EXECUTABLE} mod tidy
