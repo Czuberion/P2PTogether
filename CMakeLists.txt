@@ -427,8 +427,9 @@ add_custom_target(generate_go_client_proto ALL DEPENDS ${GO_CLIENT_OUT_DIR}/clie
 
 set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
 set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
+# Build to a fixed staging location (Go has no Debug/Release distinction)
 set(GO_SERVICE_BIN
-    "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
+    "${CMAKE_BINARY_DIR}/bin/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
 
 # Ensure bin directory exists
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -452,6 +453,13 @@ add_custom_command(
 
 add_custom_target(peer_service ALL DEPENDS "${GO_SERVICE_BIN}")
 add_dependencies(peer_service generate_go_client_proto)
+
+# Copy Go binary alongside the C++ executable in each config's output directory
+add_custom_command(TARGET P2PTogether POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GO_SERVICE_BIN}"
+            "$<TARGET_FILE_DIR:P2PTogether>"
+    COMMENT "Copying peer_service to $<TARGET_FILE_DIR:P2PTogether>")
 
 # --- FFMPEG Handling ---
 # Find the ffmpeg executable and copy it next to our other binaries post-build
