@@ -365,10 +365,10 @@ if(GO_WORK_MODULES)
         COMMENT "Regenerating temporary go.work workspace at repo root"
         VERBATIM)
 
-    add_custom_target(go_workspace ALL DEPENDS ${GO_WORK_FILE})
+    add_custom_target(go_workspace DEPENDS ${GO_WORK_FILE})
 else()
     # Dummy target if no modules exist
-    add_custom_target(go_workspace ALL)
+    add_custom_target(go_workspace)
 endif()
 
 # ---------------- Go vet / unit tests ----------------
@@ -427,9 +427,8 @@ add_custom_target(generate_go_client_proto ALL DEPENDS ${GO_CLIENT_OUT_DIR}/clie
 
 set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
 set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
-# set(GO_SERVICE_BIN ${CMAKE_BINARY_DIR}/bin/peer_service)
 set(GO_SERVICE_BIN
-    "${CMAKE_CURRENT_BINARY_DIR}/bin/peer_service_temp/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
+    "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
 set(GO_MOD_FILE ${GO_SERVICE_DIR}/go.mod)
 
 # Ensure bin directory exists
@@ -446,18 +445,22 @@ add_custom_command(
 file(GLOB_RECURSE GO_SERVICE_SRCS
      ${GO_SERVICE_DIR}/*.go)
 
-add_custom_target(peer_service ALL
-    DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE} go_workspace generate_go_client_proto
+add_custom_command(
+    OUTPUT "${GO_SERVICE_BIN}"
+    DEPENDS ${GO_SERVICE_SRCS} ${GO_MOD_FILE}
+            ${GO_WORK_FILE}
+            ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
     COMMAND ${GO_EXECUTABLE} mod tidy
     COMMAND ${GO_EXECUTABLE} build
             -o "${GO_SERVICE_BIN}"
             "${GO_SERVICE_SRC}"
-    # COMMAND ${GO_EXECUTABLE} build -o
-    #         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/peer_service${CMAKE_EXECUTABLE_SUFFIX}"
-    #         .
     WORKING_DIRECTORY "${GO_SERVICE_DIR}"
-    COMMENT           "Building Go peer_service - ${GO_SERVICE_BIN}"
+    COMMENT "Building Go peer_service - ${GO_SERVICE_BIN}"
+    VERBATIM
 )
+
+add_custom_target(peer_service ALL DEPENDS "${GO_SERVICE_BIN}")
+add_dependencies(peer_service generate_go_client_proto)
 
 # --- FFMPEG Handling ---
 # Find the ffmpeg executable and copy it next to our other binaries post-build
@@ -495,10 +498,3 @@ endif()
 add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc)
 add_dependencies(P2PTogether generate_cpp_client_proto)
 add_dependencies(P2PTogether peer_service)
-
-add_custom_command(TARGET P2PTogether POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${GO_SERVICE_BIN}"
-            "$<TARGET_FILE_DIR:P2PTogether>"
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_CURRENT_BINARY_DIR}/bin/peer_service_temp"
-    COMMENT "Copying peer_service executable to output directory and cleaning temp dir")
