@@ -41,21 +41,28 @@ To build and run P2PTogether, you need the following dependencies installed on y
 - [CMake](https://cmake.org/) (3.16+)
 - [Qt 6](https://www.qt.io/) (Widgets module, Network module)
 - [libmpv](https://mpv.io/) development headers
-- [gRPC & Protocol Buffers](https://grpc.io/) (for C++ code generation)
+- [gRPC & Protocol Buffers](https://grpc.io/)
 
 ## ⚙️ Building the Project
 
-The project uses CMake to orchestrate the build process for both the C++ frontend and the Go backend automatically.
+The project uses CMake to orchestrate the build process for both the C++ frontend and the Go backend automatically. A `CMakePresets.json` is included for convenience with a Ninja Multi-Config generator.
+
+**Configure once:**
 
 ```bash
-mkdir build
-cd build
-cmake ..
-cmake --build .
+cmake --preset ninja-multi
+```
+
+**Available build configurations:** `Debug`, `Release`, `RelWithDebInfo`, `MinSizeRel`
+
+**Example:**
+
+```bash
+cmake --build --preset Release
 ```
 
 > [!NOTE]
-> CMake will automatically invoke `go build` to compile the `peer_service` daemon and place it in the appropriate output directory (e.g., `build/bin`). Both `P2PTogether` and `peer_service` executables will be located together.
+> CMake will automatically invoke `go build` to compile the `peer_service` daemon and copy it alongside the `P2PTogether` executable in the selected configuration's output directory (e.g., `build/bin/Release/`).
 
 ## 📖 Usage
 
