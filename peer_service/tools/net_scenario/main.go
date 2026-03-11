@@ -22,6 +22,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	"google.golang.org/protobuf/proto"
 
+	"peer_service/internal/common"
 	"peer_service/internal/roles"
 	clientpb "peer_service/proto"
 	p2ppb "peer_service/proto/p2p"
@@ -364,7 +365,7 @@ func startInteractiveLoop(sp *ScenarioPeer) {
 						MessageId: fmt.Sprintf("%d", time.Now().UnixNano()),
 						Sender:    sp.Host.ID().String(),
 						Text:      text,
-						HlcTs:     time.Now().UnixMilli(),
+						HlcTs:     common.GetCurrentHLC(),
 					},
 				},
 			}

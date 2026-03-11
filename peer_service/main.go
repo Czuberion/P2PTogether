@@ -195,6 +195,10 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		}
 		log.Printf("[gRPC Recv %s] %s, HLC: %d", nodeIDStr, cmdTypeString, hlc)
 
+		if hlc > 0 {
+			common.UpdateHLC(hlc)
+		}
+
 		switch cmd := clientMsg.Payload.(type) {
 		case *clientpb.ClientMsg_CreateSessionRequest:
 			req := cmd.CreateSessionRequest
@@ -1502,6 +1506,9 @@ func processChatTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv
 		}
 
 		if chatPayload, ok := serverMsg.GetPayload().(*clientpb.ServerMsg_ChatMsg); ok {
+			if chatPayload.ChatMsg.HlcTs > 0 {
+				common.UpdateHLC(chatPayload.ChatMsg.HlcTs)
+			}
 			log.Printf("[gossip ChatRecv] Received ChatMsg (ID: %s, Sender: %s, Text: '%.20s...', HLC: %d) from %s. Broadcasting to local hub.",
 				chatPayload.ChatMsg.MessageId, chatPayload.ChatMsg.Sender, chatPayload.ChatMsg.Text, chatPayload.ChatMsg.HlcTs, msg.ReceivedFrom)
 			// Forward the *entire* ServerMsg (which wraps ChatMsg) to local GUI clients
@@ -1514,6 +1521,9 @@ func processChatTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv
 
 func handleGossipQueueUpdate(update *p2ppb.QueueUpdate, from peer.ID, srv *server) {
 	log.Printf("[gossip Ctrl] handleGossipQueueUpdate: received from %s (HLC: %d)", from, update.HlcTs)
+	if update.HlcTs > 0 {
+		common.UpdateHLC(update.HlcTs)
+	}
 	if err := srv.queueCtrl.ApplyUpdate(update, from, srv.hub, srv.node, srv.roleManager); err != nil {
 		log.Printf("[gossip Ctrl] Rejected QueueUpdate from %s: %v", from, err)
 	}
@@ -1521,6 +1531,9 @@ func handleGossipQueueUpdate(update *p2ppb.QueueUpdate, from peer.ID, srv *serve
 
 func handleGossipRoleDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate, from peer.ID, srv *server) {
 	log.Printf("[gossip Ctrl] handleGossipRoleDefinitionsUpdate: received from %s (HLC: %d)", from, update.HlcTs)
+	if update.HlcTs > 0 {
+		common.UpdateHLC(update.HlcTs)
+	}
 	if err := srv.roleManager.ApplyDefinitionsUpdate(update); err != nil {
 		log.Printf("[gossip Ctrl] Error applying RoleDefinitionsUpdate from %s: %v", from, err)
 	} else {
@@ -1541,6 +1554,9 @@ func handleGossipRoleDefinitionsUpdate(update *p2ppb.RoleDefinitionsUpdate, from
 
 func handleGossipPeerRoleAssignment(assignment *p2ppb.PeerRoleAssignment, from peer.ID, srv *server) {
 	log.Printf("[gossip Ctrl] handleGossipPeerRoleAssignment: for peer %s from %s (HLC: %d)", assignment.PeerId, from, assignment.HlcTs)
+	if assignment.HlcTs > 0 {
+		common.UpdateHLC(assignment.HlcTs)
+	}
 	targetPeerID, err := peer.Decode(assignment.PeerId)
 	if err != nil {
 		log.Printf("[gossip Ctrl] Invalid peer ID '%s' in PeerRoleAssignment from %s: %v", assignment.PeerId, from, err)
@@ -1563,6 +1579,9 @@ func handleGossipPeerRoleAssignment(assignment *p2ppb.PeerRoleAssignment, from p
 
 func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, from peer.ID, srv *server) {
 	log.Printf("[gossip Ctrl] handleGossipAllPeerRoleAssignments: received from %s (HLC: %d)", from, snapshot.HlcTs)
+	if snapshot.HlcTs > 0 {
+		common.UpdateHLC(snapshot.HlcTs)
+	}
 	if err := srv.roleManager.ApplyAllAssignmentsSnapshot(snapshot); err != nil {
 		log.Printf("[gossip Ctrl] Error applying AllPeerRoleAssignments from %s: %v", from, err)
 	} else {
@@ -1578,6 +1597,9 @@ func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, 
 // handleGossipPlaylistReset resets the local RingBuffer and HLS state in response to a remote command.
 func handleGossipPlaylistReset(cmd *p2ppb.PlaylistReset, from peer.ID, srv *server) {
 	log.Printf("[gossip Ctrl] handleGossipPlaylistReset: received from %s (Seq: %d, HLC: %d)", from, cmd.Sequence, cmd.HlcTs)
+	if cmd.HlcTs > 0 {
+		common.UpdateHLC(cmd.HlcTs)
+	}
 	// Reset the local RingBuffer to the new base sequence. This purges old segments.
 	if rb := srv.node.RingBuffer(); rb != nil {
 		rb.Reset(cmd.Sequence)
@@ -1592,6 +1614,10 @@ func handleGossipPlaylistReset(cmd *p2ppb.PlaylistReset, from peer.ID, srv *serv
 func handleGossipPlaybackStateCmd(cmd *p2ppb.SetPlaybackStateCmd, from peer.ID, srv *server) {
 	log.Printf("[gossip PlaybackRecv] Received SetPlaybackStateCmd (Play:%v Pos:%.2f Speed:%.2f HLC:%d StreamSeq: %d) from %s.",
 		cmd.TargetIsPlaying, cmd.TargetTimePos, cmd.TargetSpeed, cmd.HlcTs, cmd.StreamSequenceId, from)
+
+	if cmd.HlcTs > 0 {
+		common.UpdateHLC(cmd.HlcTs)
+	}
 
 	// Update QueueController's state *before* broadcasting to local GUI.
 	srv.queueCtrl.UpdateLastKnownPlaybackState(cmd)

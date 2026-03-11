@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"peer_service/internal/common"
 	clientpb "peer_service/proto"
 	p2ppb "peer_service/proto/p2p"
 )
@@ -73,7 +74,7 @@ func main() {
 		req := &clientpb.ClientMsg_ChatCmd{
 			ChatCmd: &p2ppb.ChatCmd{
 				Text:  *messageF,
-				HlcTs: time.Now().UnixMilli(),
+				HlcTs: common.GetCurrentHLC(),
 			},
 		}
 		if err := stream.Send(&clientpb.ClientMsg{Payload: req}); err != nil {
@@ -93,7 +94,7 @@ func main() {
 			SetPeerRolesCmd: &p2ppb.SetPeerRolesCmd{
 				TargetPeerId:      *targetPeerF,
 				AssignedRoleNames: roleList,
-				HlcTs:             time.Now().UnixMilli(),
+				HlcTs:             common.GetCurrentHLC(),
 			},
 		}
 		if err := stream.Send(&clientpb.ClientMsg{Payload: req}); err != nil {
@@ -111,7 +112,7 @@ func main() {
 			QueueCmd: &p2ppb.QueueCmd{
 				Type:     p2ppb.QueueCmd_APPEND,
 				FilePath: *fileF,
-				HlcTs:    time.Now().UnixMilli(),
+				HlcTs:    common.GetCurrentHLC(),
 			},
 		}
 		if err := stream.Send(&clientpb.ClientMsg{Payload: req}); err != nil {
