@@ -47,15 +47,29 @@ To build and run P2PTogether, you need the following dependencies installed on y
 
 The project uses CMake to orchestrate the build process for both the C++ frontend and the Go backend automatically. A `CMakePresets.json` is included for convenience with a Ninja Multi-Config generator.
 
-**Configure once:**
-
-```bash
-cmake --preset ninja-multi
-```
-
 **Available build configurations:** `Debug`, `Release`, `RelWithDebInfo`, `MinSizeRel`
 
-**Example:**
+> [!WARNING]
+> **Known issue on freshly cloned repos:** The first build attempt will fail due to protobuf-generated code not being available at initial configure time. This is a temporary issue that will be fixed later.
+>
+> **Option A** — configure, let it fail, then configure and build again:
+> ```bash
+> cmake --preset ninja-multi        # 1. Configure
+> cmake --build --preset Release    # 2. Build (will fail — expected)
+> cmake --preset ninja-multi        # 3. Configure again
+> cmake --build --preset Release    # 4. Build (succeeds)
+> ```
+>
+> **Option B** — generate protobuf code first, then configure and build (unverified, but should work):
+> ```bash
+> cmake --preset ninja-multi                                              # 1. Configure
+> cmake --build --preset Release --target generate_go_client_proto       # 2. Generate Go proto
+> cmake --build --preset Release --target generate_cpp_client_proto      # 3. Generate C++ proto
+> cmake --preset ninja-multi                                              # 4. Configure again
+> cmake --build --preset Release                                          # 5. Build (succeeds)
+> ```
+
+For subsequent builds (after the initial setup), a single build command is sufficient:
 
 ```bash
 cmake --build --preset Release

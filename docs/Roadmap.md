@@ -1,0 +1,12 @@
+- [ ] Review, refactor, and commit latest features (moderation, chat, etc.)
+- [ ] Fix remaining build issues
+- [ ] Check exact dependencies and versions
+- [ ] Switch HLS implementation
+- [ ] Enhance peer discovery
+- [ ] Switch to UDP/QUIC for segment propagation
+- [ ] Change segment transcoding for lower latency
+- [ ] Refactor Peer Service architecture
+- [ ] Investigate latency issues
+- [ ] Explore auth alternatives
+- [ ] Verify and test segment ordering in varying network conditions
+- [ ] Investigate NAT traversal issues
