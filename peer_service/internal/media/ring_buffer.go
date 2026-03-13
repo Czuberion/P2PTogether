@@ -39,6 +39,22 @@ type RingBuffer struct {
 	publishEvents    bool              // Flag to control event publishing
 }
 
+// maybeAdvanceBaseLocked moves baseSeq forward when the live window exceeded
+// capacity, but never moves it backwards. This is critical after Reset(newBase)
+// where newBase may already be much larger than capacity.
+func (rb *RingBuffer) maybeAdvanceBaseLocked() {
+	if rb.capacity <= 0 {
+		return
+	}
+	if rb.nextSeq <= uint32(rb.capacity) {
+		return
+	}
+	candidate := rb.nextSeq - uint32(rb.capacity)
+	if candidate > rb.baseSeq {
+		rb.baseSeq = candidate
+	}
+}
+
 // NewRingBuffer returns a buffer that holds window seconds of video.
 // window MUST be a multiple of 2 s. Example: NewRingBuffer(120) → 60 slots.
 func NewRingBuffer(windowSeconds int) *RingBuffer {
@@ -103,10 +119,8 @@ func (rb *RingBuffer) Write(data []byte, pts float64, actualDuration float64) ui
 	rb.nextSeq++
 	rb.head = int(rb.nextSeq % uint32(rb.capacity))
 
-	// Re‑compute the first live sequence: everything older than capacity is gone.
-	if rb.nextSeq > uint32(rb.capacity) {
-		rb.baseSeq = rb.nextSeq - uint32(rb.capacity)
-	}
+	// Re-compute live window floor without allowing base regression.
+	rb.maybeAdvanceBaseLocked()
 	return seq
 }
 
@@ -120,14 +134,30 @@ func (rb *RingBuffer) Snapshot() (base uint32, segs []Segment) {
 		return rb.baseSeq, nil
 	}
 
+	// Build a contiguous run only. HLS playlist sequence numbers are implicit,
+	// so gaps in listed segments corrupt timeline mapping across peers.
 	count := rb.nextSeq - rb.baseSeq
 	segs = make([]Segment, 0, count)
+	started := false
+	actualBase := rb.baseSeq
 	for seq := rb.baseSeq; seq < rb.nextSeq; seq++ {
-		if idx := rb.idxFor(seq); idx >= 0 {
-			segs = append(segs, rb.buf[idx])
+		idx := rb.idxFor(seq)
+		if idx < 0 {
+			if started {
+				break
+			}
+			continue
 		}
+		if !started {
+			started = true
+			actualBase = seq
+		}
+		segs = append(segs, rb.buf[idx])
 	}
-	return rb.baseSeq, segs
+	if !started {
+		return rb.baseSeq, nil
+	}
+	return actualBase, segs
 }
 
 // Get returns the raw payload for a given sequence, or nil if it's out of range.
@@ -160,10 +190,8 @@ func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64, actualDurati
 		rb.nextSeq = seq + 1
 	}
 
-	// Evict anything older than capacity.
-	if rb.nextSeq > uint32(rb.capacity) {
-		rb.baseSeq = rb.nextSeq - uint32(rb.capacity)
-	}
+	// Evict anything older than capacity without moving base backwards.
+	rb.maybeAdvanceBaseLocked()
 
 	// Too old for the current window.
 	if seq < rb.baseSeq {

@@ -5,7 +5,7 @@
 - [ ] Switch to UDP/QUIC for segment propagation
 - [x] Change segment transcoding for lower latency
 - [ ] Refactor Peer Service architecture
-- [ ] Investigate latency issues
+- [x] Investigate latency issues
 - [ ] Explore auth alternatives
 - [ ] Verify and test segment ordering in varying network conditions
 - [ ] Investigate NAT traversal issues

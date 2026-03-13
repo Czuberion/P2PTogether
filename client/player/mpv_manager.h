@@ -74,6 +74,12 @@ public:
      */
     QString getStreamURL() const;
 
+    // Returns true when the playlist probe parsed #EXT-X-MEDIA-SEQUENCE.
+    bool hasProbedMediaSequence() const;
+
+    // Returns the last media sequence parsed from the probed playlist.
+    quint32 probedMediaSequence() const;
+
     /*!
      * \brief Sets the HLS URL for the stream to be played.
      * \param url The new HLS URL to be set.
@@ -90,6 +96,8 @@ private:
     // ——— Added for HLS “empty playlist” probe ———
     QNetworkAccessManager nam_; ///< used to fetch the playlist
     QTimer probeTimer_;         ///< polls every 500 ms
+    bool m_hasProbedMediaSequence = false;
+    quint32 m_probedMediaSequence = 0;
 
     /// Timer callback that fetches the playlist and looks for “#EXTINF:”
     void probePlaylist();

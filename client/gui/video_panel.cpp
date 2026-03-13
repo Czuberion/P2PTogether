@@ -61,7 +61,10 @@ sendPlaybackStateCommand(P2P::ControlStreamWorker* worker,
     // Use 0 if appInstance is null or seqId not available
     cmd->set_stream_sequence_id(
         appInstance ? appInstance->getCurrentStreamSequenceId() : 0);
-    cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch()); // Set HLC timestamp
+    const int64_t hlcTs = appInstance
+                              ? appInstance->nextMonotonicPlaybackHlcTs()
+                              : QDateTime::currentMSecsSinceEpoch();
+    cmd->set_hlc_ts(hlcTs);
     worker->send(clientMsg);
     // qDebug() << "Sent SetPlaybackStateCmd: Pos" << targetPos << "Playing"
     //          << targetIsPlaying << "Speed" << targetSpeed << "GlobalPos"
@@ -105,7 +108,13 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     // --- Load the HLS URL ---
     QObject::connect(
         mpvManager, &player::MpvManager::playlistReady,
-        [mpvWidget](const QString& url) {
+        [mpvWidget, mpvManager, app](const QString& url) {
+            if (app && mpvManager && mpvManager->hasProbedMediaSequence()) {
+                const double localOriginSec =
+                    static_cast<double>(mpvManager->probedMediaSequence()) *
+                    2.0;
+                app->setLocalPlaybackOriginSec(localOriginSec);
+            }
             const QChar sep = url.contains('?') ? '&' : '?';
             const QString freshUrl =
                 url + sep +

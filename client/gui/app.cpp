@@ -923,6 +923,30 @@ uint32_t App::getCurrentStreamSequenceId() const {
     return m_activePlaylistSequenceId;
 }
 
+int64_t App::nextMonotonicPlaybackHlcTs() {
+    const int64_t wallNow = QDateTime::currentMSecsSinceEpoch();
+    // Keep client-originated playback HLC in the same monotonic timeline as
+    // server-originated PlaylistReset/PlaybackStateCmd HLC values.
+    const int64_t next       = (wallNow > m_lastAppliedPlaybackHlc)
+                                   ? wallNow
+                                   : (m_lastAppliedPlaybackHlc + 1);
+    m_lastAppliedPlaybackHlc = next;
+    return next;
+}
+
+void App::setLocalPlaybackOriginSec(double originSec) {
+    if (originSec < 0) {
+        return;
+    }
+    if (qFuzzyCompare(m_playlistOriginSec + 1.0, originSec + 1.0)) {
+        return;
+    }
+    qInfo() << "App::setLocalPlaybackOriginSec: recalibrating local origin from"
+            << m_playlistOriginSec << "to" << originSec
+            << "for active stream seq" << m_activePlaylistSequenceId;
+    m_playlistOriginSec = originSec;
+}
+
 void App::onMpvPositionChanged(double newPosition) {
     if (m_playbackCompletedCurrentStream || !m_mpvWidget ||
         m_currentPlayingIndex < 0 ||

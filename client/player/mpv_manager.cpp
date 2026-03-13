@@ -3,6 +3,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QUrl>
 #include <cerrno>
@@ -38,6 +39,14 @@ QString MpvManager::getStreamURL() const {
     return m_hlsURL;
 }
 
+bool MpvManager::hasProbedMediaSequence() const {
+    return m_hasProbedMediaSequence;
+}
+
+quint32 MpvManager::probedMediaSequence() const {
+    return m_probedMediaSequence;
+}
+
 void MpvManager::setStreamURL(const QString& url) {
     m_hlsURL = url;
     if (!probeTimer_.isActive())
@@ -58,6 +67,17 @@ void MpvManager::probePlaylist() {
         rep->deleteLater();
 
         if (err == QNetworkReply::NoError && body.contains("#EXTINF")) {
+            const QString bodyStr = QString::fromUtf8(body);
+            static const QRegularExpression re("#EXT-X-MEDIA-SEQUENCE:(\\d+)");
+            const QRegularExpressionMatch m = re.match(bodyStr);
+            if (m.hasMatch()) {
+                bool ok              = false;
+                const quint32 parsed = m.captured(1).toUInt(&ok);
+                if (ok) {
+                    m_probedMediaSequence    = parsed;
+                    m_hasProbedMediaSequence = true;
+                }
+            }
             probeTimer_.stop(); // playlist finally ready
             tryStartPlayback();
         }

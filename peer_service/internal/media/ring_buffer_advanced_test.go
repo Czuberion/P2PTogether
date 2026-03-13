@@ -102,3 +102,52 @@ func TestRingBuffer_GetNextSeq(t *testing.T) {
 		t.Errorf("Expected NextSeq to be 101, got %d", seq)
 	}
 }
+
+// TestRingBuffer_ResetHighBaseDoesNotRegress verifies that writing after
+// Reset(highSeq) does not move base backwards (which would invalidate
+// playlist MEDIA-SEQUENCE semantics).
+func TestRingBuffer_ResetHighBaseDoesNotRegress(t *testing.T) {
+	rb := media.NewRingBuffer(120) // 60 segments
+	rb.Reset(300)
+
+	rb.WriteAt(300, []byte("seg-300"), 0, 2.0)
+	base, segs := rb.Snapshot()
+
+	if base != 300 {
+		t.Fatalf("expected base to stay at 300 after first write, got %d", base)
+	}
+	if len(segs) != 1 || segs[0].Seq != 300 {
+		t.Fatalf("expected snapshot to contain only seq 300, got %#v", segs)
+	}
+}
+
+// TestRingBuffer_SnapshotContiguousOnly ensures Snapshot never returns a list
+// with sequence gaps. This keeps HLS playlists self-consistent when writes
+// arrive out of order.
+func TestRingBuffer_SnapshotContiguousOnly(t *testing.T) {
+	rb := media.NewRingBuffer(120) // 60 segments
+	rb.Reset(100)
+
+	// Out-of-order arrival: receive 102 first, then 100 and 101.
+	rb.WriteAt(102, []byte("seg-102"), 0, 2.0)
+
+	base, segs := rb.Snapshot()
+	if base != 102 || len(segs) != 1 || segs[0].Seq != 102 {
+		t.Fatalf("expected first snapshot base=102 with single segment, got base=%d segs=%#v", base, segs)
+	}
+
+	rb.WriteAt(100, []byte("seg-100"), 0, 2.0)
+	base, segs = rb.Snapshot()
+	if base != 100 || len(segs) != 1 || segs[0].Seq != 100 {
+		t.Fatalf("expected snapshot to expose contiguous head only (100), got base=%d segs=%#v", base, segs)
+	}
+
+	rb.WriteAt(101, []byte("seg-101"), 0, 2.0)
+	base, segs = rb.Snapshot()
+	if base != 100 {
+		t.Fatalf("expected base=100 once contiguous run exists, got %d", base)
+	}
+	if len(segs) != 3 || segs[0].Seq != 100 || segs[1].Seq != 101 || segs[2].Seq != 102 {
+		t.Fatalf("expected contiguous 100..102, got %#v", segs)
+	}
+}

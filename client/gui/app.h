@@ -50,6 +50,8 @@ public:
     TestServer* testServer() const { return m_testServer; }
 
     double playlistOriginSec() const { return m_playlistOriginSec; }
+    void setLocalPlaybackOriginSec(double originSec);
+    int64_t nextMonotonicPlaybackHlcTs();
 
     // Methods for video_panel to query queue state for button enablement
     QList<client::p2p::QueueItem> getCurrentQueueItems() const;
