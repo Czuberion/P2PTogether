@@ -13,6 +13,14 @@ message ChatCmd {
   string reply_to = 3;
 }
 
+// Command to delete a specific chat message.
+message ChatDeleteCmd {
+  // The message_id of the message to delete.
+  string message_id = 1;
+  // Hybrid Logical Clock timestamp for ordering.
+  int64 hlc_ts = 2;
+}
+
 // Chat messages broadcast by the Peer Service to all clients.
 message ChatMsg {
   // Service-generated ULID for this message.
@@ -25,4 +33,14 @@ message ChatMsg {
   int64 hlc_ts = 4;
   // If non-empty, indicates this is a reply to the given message_id.
   string reply_to = 5;
+}
+
+// Broadcast when a chat message is deleted by a moderator/admin.
+message ChatDeleteMsg {
+  // The message_id of the deleted message.
+  string message_id = 1;
+  // Peer.ID (string form) of the moderator/admin who deleted the message.
+  string deleted_by = 2;
+  // Hybrid Logical Clock timestamp for ordering.
+  int64 hlc_ts = 3;
 }

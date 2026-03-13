@@ -33,6 +33,10 @@ message ClientMsg {
     client.p2p.PlaybackStreamCompleted playback_stream_completed_cmd = 7;
     client.p2p.CreateSessionRequest create_session_request = 8;
     client.p2p.JoinSessionRequest join_session_request = 9;
+    client.p2p.ChatDeleteCmd chat_delete_cmd = 10;
+    client.p2p.KickPeerCmd kick_peer_cmd = 11;
+    client.p2p.BanPeerCmd ban_peer_cmd = 12;
+    client.p2p.LeaveSessionRequest leave_session_request = 13;
   }
 }
 
@@ -51,6 +55,10 @@ message ServerMsg {
     client.p2p.PlaylistReset playlist_reset = 10;
     client.p2p.CreateSessionResponse create_session_response = 11;
     client.p2p.JoinSessionResponse join_session_response = 12;
+    client.p2p.ChatDeleteMsg chat_delete_msg = 13;
+    client.p2p.PeerKicked peer_kicked = 14;
+    client.p2p.PeerBanned peer_banned = 15;
+    client.p2p.PeerLeft peer_left = 16;
   }
 }
 

@@ -52,6 +52,68 @@ message JoinSessionResponse {
   optional string error_message = 5;
 }
 
+// Request to leave the current session.
+message LeaveSessionRequest {
+  // The session ID to leave.
+  string session_id = 1;
+  // Timestamp for ordering.
+  int64 hlc_ts = 2;
+}
+
+// Command to kick a peer from the session.
+message KickPeerCmd {
+  // Target Peer ID to kick.
+  string target_peer_id = 1;
+  // Optional reason for the kick.
+  string reason = 2;
+  // Timestamp for ordering.
+  int64 hlc_ts = 3;
+}
+
+// Command to ban a peer from the session.
+message BanPeerCmd {
+  // Target Peer ID to ban.
+  string target_peer_id = 1;
+  // Optional reason for the ban.
+  string reason = 2;
+  // Timestamp for ordering.
+  int64 hlc_ts = 3;
+}
+
+// Broadcast when a peer is kicked from the session.
+message PeerKicked {
+  // The peer that was kicked.
+  string peer_id = 1;
+  // The peer that issued the kick.
+  string issued_by = 2;
+  // Optional reason for the kick.
+  string reason = 3;
+  // Timestamp for ordering.
+  int64 hlc_ts = 4;
+}
+
+// Broadcast when a peer is banned from the session.
+message PeerBanned {
+  // The peer that was banned.
+  string peer_id = 1;
+  // The peer that issued the ban.
+  string issued_by = 2;
+  // Optional reason for the ban.
+  string reason = 3;
+  // Timestamp for ordering.
+  int64 hlc_ts = 4;
+}
+
+// Broadcast when a peer leaves a session (voluntary or disconnected).
+message PeerLeft {
+  // The peer that left.
+  string peer_id = 1;
+  // Optional reason for leaving (e.g., "disconnect").
+  string reason = 2;
+  // Timestamp for ordering.
+  int64 hlc_ts = 3;
+}
+
 // AuthRequest is sent by the Joiner to the Admin over the /auth/1 stream.
 message AuthRequest {
   string session_id = 1; // SessionID the joiner wants to join
