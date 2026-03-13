@@ -14,9 +14,11 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSplitter>
@@ -56,9 +58,13 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
     chatWidget->setLayout(chatLayout);
 
     // Chat messages area
-    QTextEdit* chatMessages = new QTextEdit();
-    chatMessages->setReadOnly(true);
+    QListWidget* chatMessages = new QListWidget();
     chatMessages->setMinimumHeight(200);
+    chatMessages->setSelectionMode(QAbstractItemView::NoSelection);
+    chatMessages->setContextMenuPolicy(Qt::CustomContextMenu);
+    chatMessages->setWordWrap(true);
+    chatMessages->setTextElideMode(Qt::ElideNone);
+    chatMessages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     // Chat input area
     QWidget* chatInputWidget     = new QWidget();
@@ -69,8 +75,21 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
     QPushButton* sendButton = new QPushButton("Send");
     chatInputLayout->addWidget(chatInput, 1);
     chatInputLayout->addWidget(sendButton);
+    QObject::connect(sendButton, &QPushButton::clicked, [chatInput, worker]() {
+        QString msg = chatInput->text();
+        if (!msg.isEmpty()) {
+            if (worker) {
+                client::ClientMsg clientMsg;
+                auto* chatCmdProto = clientMsg.mutable_chat_cmd();
+                chatCmdProto->set_text(msg.toStdString());
+                chatCmdProto->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+                worker->send(clientMsg);
+            }
+            chatInput->clear();
+        }
+    });
     QObject::connect(
-        sendButton, &QPushButton::clicked, [chatInput, chatMessages, worker]() {
+        chatInput, &QLineEdit::returnPressed, [chatInput, worker]() {
             QString msg = chatInput->text();
             if (!msg.isEmpty()) {
                 if (worker) {
@@ -84,31 +103,69 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                 chatInput->clear();
             }
         });
-    QObject::connect(chatInput, &QLineEdit::returnPressed,
-                     [chatInput, chatMessages, worker]() {
-                         QString msg = chatInput->text();
-                         if (!msg.isEmpty()) {
-                             if (worker) {
-                                 client::ClientMsg clientMsg;
-                                 auto* chatCmdProto =
-                                     clientMsg.mutable_chat_cmd();
-                                 chatCmdProto->set_text(msg.toStdString());
-                                 chatCmdProto->set_hlc_ts(
-                                     QDateTime::currentMSecsSinceEpoch());
-                                 worker->send(clientMsg);
-                             }
-                             chatInput->clear();
-                         }
-                     });
     QObject::connect(
         app, &gui::App::chatMessageReceived, chatMessages,
-        [chatMessages](const QString& senderName, const QString& messageText,
-                       bool /*isSelf*/) {
-            QString formattedMessage = QString("<b>%1</b>: %2")
-                                           .arg(senderName.toHtmlEscaped(),
-                                                messageText.toHtmlEscaped());
-            chatMessages->append(formattedMessage);
+        [chatMessages](const QString& messageId, const QString& senderName,
+                       const QString& messageText, bool isSelf) {
+            QString prefix = isSelf ? "(You) " : "";
+            QString displayText =
+                QString("%1%2: %3").arg(prefix, senderName, messageText);
+            auto* item = new QListWidgetItem(displayText, chatMessages);
+            item->setData(Qt::UserRole, messageId);
+            chatMessages->scrollToBottom();
         });
+
+    QObject::connect(app, &gui::App::chatMessageDeleted, chatMessages,
+                     [chatMessages](const QString& messageId, const QString&) {
+                         if (messageId.isEmpty())
+                             return;
+                         for (int i = 0; i < chatMessages->count(); ++i) {
+                             QListWidgetItem* item = chatMessages->item(i);
+                             if (item->data(Qt::UserRole).toString() ==
+                                 messageId) {
+                                 delete chatMessages->takeItem(i);
+                                 break;
+                             }
+                         }
+                     });
+
+    QObject::connect(
+        chatMessages, &QListWidget::customContextMenuRequested, chatMessages,
+        [chatMessages, roleStore, worker](const QPoint& pos) {
+            QListWidgetItem* item = chatMessages->itemAt(pos);
+            if (!item || !roleStore || !worker)
+                return;
+
+            const QString messageId = item->data(Qt::UserRole).toString();
+            if (messageId.isEmpty())
+                return;
+
+            const QString me       = roleStore->getLocalPeerId();
+            const bool canModerate = (roleStore->getPermissionsForPeer(me) &
+                                      P2P::Roles::PermModerateChat) != 0;
+            if (!canModerate)
+                return;
+
+            QMenu menu(chatMessages);
+            QAction* deleteAction = menu.addAction("Delete message");
+            QAction* selected =
+                menu.exec(chatMessages->viewport()->mapToGlobal(pos));
+            if (selected != deleteAction)
+                return;
+
+            client::ClientMsg clientMsg;
+            auto* cmd = clientMsg.mutable_chat_delete_cmd();
+            cmd->set_message_id(messageId.toStdString());
+            cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+            worker->send(clientMsg);
+        });
+
+    QObject::connect(app, &gui::App::sessionStateChanged, chatMessages,
+                     [chatMessages](bool isActive) {
+                         if (!isActive) {
+                             chatMessages->clear();
+                         }
+                     });
     chatLayout->addWidget(chatMessages);
     chatLayout->addWidget(chatInputWidget);
 
@@ -320,7 +377,9 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
     // Use a non-blocking, non-native dialog so mpv’s GL thread doesn’t
     // interfere with the OS-level file-chooser.  The dialog is destroyed
     // automatically after use.
-    QObject::connect(addBtn, &QPushButton::clicked, [window, worker]() {
+    QObject::connect(addBtn, &QPushButton::clicked, [window, worker, app]() {
+        if (!app || app->getCurrentSessionId().isEmpty())
+            return;
         auto* dialog = new QFileDialog(window);
         dialog->setWindowTitle("Open Video File");
 
@@ -351,37 +410,43 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
         dialog->open(); // non-modal → UI stays responsive
     });
 
-    QObject::connect(removeBtn, &QPushButton::clicked, [queueList, worker]() {
-        int row = queueList->currentRow();
-        if (row >= 0) {
+    QObject::connect(
+        removeBtn, &QPushButton::clicked, [queueList, worker, app]() {
+            if (!app || app->getCurrentSessionId().isEmpty())
+                return;
+            int row = queueList->currentRow();
+            if (row >= 0) {
+                if (worker) {
+                    client::ClientMsg clientMsg;
+                    client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
+                    cmd->set_type(client::p2p::QueueCmd_Type_REMOVE);
+                    cmd->set_index(static_cast<int32_t>(row));
+                    // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+
+                    qDebug() << "GUI: Sending REMOVE QueueCmd for index" << row;
+                    worker->send(clientMsg);
+                }
+                // The QListWidget will be updated when ServerMsg_QueueUpdate is
+                // received.
+            }
+        });
+
+    QObject::connect(
+        clearBtn, &QPushButton::clicked, [queueList, worker, app]() {
+            if (!app || app->getCurrentSessionId().isEmpty())
+                return;
             if (worker) {
                 client::ClientMsg clientMsg;
                 client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
-                cmd->set_type(client::p2p::QueueCmd_Type_REMOVE);
-                cmd->set_index(static_cast<int32_t>(row));
+                cmd->set_type(client::p2p::QueueCmd_Type_CLEAR);
                 // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
 
-                qDebug() << "GUI: Sending REMOVE QueueCmd for index" << row;
+                qDebug() << "GUI: Sending CLEAR QueueCmd";
                 worker->send(clientMsg);
             }
             // The QListWidget will be updated when ServerMsg_QueueUpdate is
             // received.
-        }
-    });
-
-    QObject::connect(clearBtn, &QPushButton::clicked, [queueList, worker]() {
-        if (worker) {
-            client::ClientMsg clientMsg;
-            client::p2p::QueueCmd* cmd = clientMsg.mutable_queue_cmd();
-            cmd->set_type(client::p2p::QueueCmd_Type_CLEAR);
-            // cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
-
-            qDebug() << "GUI: Sending CLEAR QueueCmd";
-            worker->send(clientMsg);
-        }
-        // The QListWidget will be updated when ServerMsg_QueueUpdate is
-        // received.
-    });
+        });
 
     QObject::connect(queueList, &QListWidget::currentRowChanged,
                      [removeBtn, infoBtn](int row) {
@@ -597,9 +662,29 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                 QPushButton* kickBtn = new QPushButton("Kick");
                 actionsLayout->addWidget(kickBtn);
                 QObject::connect(kickBtn, &QPushButton::clicked, window, [=]() {
-                    QMessageBox::information(
-                        window, "Not Implemented",
-                        "Kicking users is not yet implemented.");
+                    if (!worker)
+                        return;
+                    if (QMessageBox::question(
+                            window, "Confirm Kick",
+                            QString("Kick %1 from the session?").arg(username),
+                            QMessageBox::Yes | QMessageBox::No) !=
+                        QMessageBox::Yes) {
+                        return;
+                    }
+
+                    bool ok        = false;
+                    QString reason = QInputDialog::getText(
+                        window, "Kick Reason",
+                        "Reason (optional):", QLineEdit::Normal, "", &ok);
+                    if (!ok)
+                        return;
+
+                    client::ClientMsg msg;
+                    auto* cmd = msg.mutable_kick_peer_cmd();
+                    cmd->set_target_peer_id(peerId.toStdString());
+                    cmd->set_reason(reason.toStdString());
+                    cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+                    worker->send(msg);
                 });
             }
 
@@ -607,9 +692,29 @@ QWidget* createRightPanel(gui::App* app, QMainWindow* window,
                 QPushButton* banBtn = new QPushButton("Ban");
                 actionsLayout->addWidget(banBtn);
                 QObject::connect(banBtn, &QPushButton::clicked, window, [=]() {
-                    QMessageBox::information(
-                        window, "Not Implemented",
-                        "Banning users is not yet implemented.");
+                    if (!worker)
+                        return;
+                    if (QMessageBox::question(
+                            window, "Confirm Ban",
+                            QString("Ban %1 from the session?").arg(username),
+                            QMessageBox::Yes | QMessageBox::No) !=
+                        QMessageBox::Yes) {
+                        return;
+                    }
+
+                    bool ok        = false;
+                    QString reason = QInputDialog::getText(
+                        window, "Ban Reason",
+                        "Reason (optional):", QLineEdit::Normal, "", &ok);
+                    if (!ok)
+                        return;
+
+                    client::ClientMsg msg;
+                    auto* cmd = msg.mutable_ban_peer_cmd();
+                    cmd->set_target_peer_id(peerId.toStdString());
+                    cmd->set_reason(reason.toStdString());
+                    cmd->set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+                    worker->send(msg);
                 });
             }
 

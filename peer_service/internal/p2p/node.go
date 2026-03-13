@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -44,6 +45,11 @@ type Node struct {
 	videoTopic *pubsub.Topic  // /p2ptogether/video/1   (push 2‑s .ts)
 	chatTopic  *pubsub.Topic  // /p2ptogether/chat/<SID>
 	ctrlTopic  *pubsub.Topic  // /p2ptogether/control/<SID>
+
+	// Default topics cached for rejoin after session leave/kick.
+	defaultVideoTopic *pubsub.Topic
+	defaultChatTopic  *pubsub.Topic
+	defaultCtrlTopic  *pubsub.Topic
 
 	// --- lightweight analytics counters ---
 	bytesUp   uint64
@@ -431,18 +437,50 @@ func (n *Node) JoinSessionTopics(sessionID string) error {
 		return fmt.Errorf("pubsub service not initialized in node")
 	}
 
-	// Leave previous session topics if they exist
-	if n.chatTopic != nil {
-		n.chatTopic.Close() // Best effort, errors not critical here
-		log.Printf("Node %s: Left previous chat topic %s", n.ID(), n.chatTopic.String())
+	if n.currentSessionID == sessionID && n.chatTopic != nil && n.ctrlTopic != nil && n.videoTopic != nil {
+		chatOk := strings.HasSuffix(n.chatTopic.String(), "/chat/"+sessionID)
+		ctrlOk := strings.HasSuffix(n.ctrlTopic.String(), "/control/"+sessionID)
+		videoOk := strings.HasSuffix(n.videoTopic.String(), "/video/"+sessionID)
+		if chatOk && ctrlOk && videoOk {
+			return nil
+		}
 	}
-	if n.ctrlTopic != nil {
-		n.ctrlTopic.Close()
-		log.Printf("Node %s: Left previous control topic %s", n.ID(), n.ctrlTopic.String())
+
+	// Preserve default topics so we can reuse them after a kick/leave.
+	if n.currentSessionID == "default" {
+		n.defaultChatTopic = n.chatTopic
+		n.defaultCtrlTopic = n.ctrlTopic
+		n.defaultVideoTopic = n.videoTopic
+		n.chatTopic = nil
+		n.ctrlTopic = nil
+		n.videoTopic = nil
+	} else {
+		// Leave previous session topics if they exist
+		if n.chatTopic != nil {
+			n.chatTopic.Close() // Best effort, errors not critical here
+			log.Printf("Node %s: Left previous chat topic %s", n.ID(), n.chatTopic.String())
+		}
+		if n.ctrlTopic != nil {
+			n.ctrlTopic.Close()
+			log.Printf("Node %s: Left previous control topic %s", n.ID(), n.ctrlTopic.String())
+		}
+		if n.videoTopic != nil {
+			n.videoTopic.Close()
+			log.Printf("Node %s: Left previous video topic %s", n.ID(), n.videoTopic.String())
+		}
+		n.chatTopic = nil
+		n.ctrlTopic = nil
+		n.videoTopic = nil
 	}
-	if n.videoTopic != nil {
-		n.videoTopic.Close()
-		log.Printf("Node %s: Left previous video topic %s", n.ID(), n.videoTopic.String())
+
+	// Reuse cached default topics if available
+	if sessionID == "default" && n.defaultChatTopic != nil && n.defaultCtrlTopic != nil && n.defaultVideoTopic != nil {
+		n.chatTopic = n.defaultChatTopic
+		n.ctrlTopic = n.defaultCtrlTopic
+		n.videoTopic = n.defaultVideoTopic
+		n.currentSessionID = sessionID
+		log.Printf("Node %s: Reusing cached default topics for session %s", n.ID(), sessionID)
+		return nil
 	}
 
 	var err error
@@ -463,6 +501,11 @@ func (n *Node) JoinSessionTopics(sessionID string) error {
 	}
 	n.currentSessionID = sessionID // Update current session ID
 	log.Printf("Node %s: Successfully joined chat (%s), control (%s), and video (%s) topics for session %s", n.ID(), n.chatTopic.String(), n.ctrlTopic.String(), n.videoTopic.String(), sessionID)
+	if sessionID == "default" {
+		n.defaultChatTopic = n.chatTopic
+		n.defaultCtrlTopic = n.ctrlTopic
+		n.defaultVideoTopic = n.videoTopic
+	}
 	return nil
 }
 

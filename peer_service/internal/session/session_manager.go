@@ -53,6 +53,7 @@ func (sm *SessionManager) CreateSession(adminPeerID peer.ID, adminUsername strin
 		IsPrivate:   false,     // Default for now
 		InviteCode:  sessionID, // Option B: InviteCode is the SessionID
 		Members:     make(map[peer.ID]UserInfo),
+		Banned:      make(map[peer.ID]BanInfo),
 	}
 
 	// Add admin as the first member
@@ -132,6 +133,67 @@ func (sm *SessionManager) AddPeerToSession(sessionID string, peerID peer.ID, use
 
 	log.Printf("SessionManager: Peer %s (%s) added to session %s with roles %v.", peerID, username, sessionID, initialRoles)
 	return session, newUserInfo, nil
+}
+
+// RemovePeerFromSession removes a peer from an existing session.
+func (sm *SessionManager) RemovePeerFromSession(sessionID string, peerID peer.ID) (UserInfo, bool, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, exists := sm.sessions[sessionID]
+	if !exists {
+		return UserInfo{}, false, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	userInfo, peerExists := session.Members[peerID]
+	if !peerExists {
+		return UserInfo{}, false, nil
+	}
+
+	delete(session.Members, peerID)
+	log.Printf("SessionManager: Peer %s removed from session %s.", peerID, sessionID)
+	return userInfo, true, nil
+}
+
+// IsPeerBanned checks if a peer is banned from a session.
+func (sm *SessionManager) IsPeerBanned(sessionID string, peerID peer.ID) (bool, BanInfo) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, exists := sm.sessions[sessionID]
+	if !exists {
+		return false, BanInfo{}
+	}
+
+	banInfo, banned := session.Banned[peerID]
+	return banned, banInfo
+}
+
+// BanPeer bans a peer from a session and removes them if present.
+func (sm *SessionManager) BanPeer(sessionID string, peerID peer.ID, bannedBy peer.ID, reason string, bannedAt int64) (BanInfo, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, exists := sm.sessions[sessionID]
+	if !exists {
+		return BanInfo{}, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	banInfo := BanInfo{
+		PeerID:   peerID,
+		BannedBy: bannedBy,
+		Reason:   reason,
+		BannedAt: bannedAt,
+	}
+
+	if memberInfo, ok := session.Members[peerID]; ok {
+		banInfo.Username = memberInfo.Username
+		delete(session.Members, peerID)
+	}
+
+	session.Banned[peerID] = banInfo
+	log.Printf("SessionManager: Peer %s banned from session %s by %s. Reason: %s", peerID, sessionID, bannedBy, reason)
+	return banInfo, nil
 }
 
 // IsPeerInSession checks if a peer is a member of a given session.

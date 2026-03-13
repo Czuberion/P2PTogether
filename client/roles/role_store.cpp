@@ -1,4 +1,5 @@
 #include "role_store.h"
+#include <QDateTime>
 #include <QDebug>
 #include <QReadLocker>
 #include <QWriteLocker>
@@ -286,6 +287,97 @@ QString RoleStore::getPeerUsername(const QString& peerId) const {
         return "";
     QReadLocker locker(&storeLock);
     return peerUsernames.value(peerId, ""); // Return empty if not found
+}
+
+void RoleStore::removePeer(const QString& peerId) {
+    if (peerId.isEmpty())
+        return;
+
+    bool changed = false;
+    {
+        QWriteLocker locker(&storeLock);
+        if (peerAssignments.remove(peerId) > 0) {
+            changed = true;
+        }
+        if (peerUsernames.remove(peerId) > 0) {
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        emit peerRolesChanged(peerId);
+        emit allAssignmentsRefreshed();
+    }
+}
+
+void RoleStore::clearAll() {
+    {
+        QWriteLocker locker(&storeLock);
+        roleDefinitions.clear();
+        peerAssignments.clear();
+        peerUsernames.clear();
+        localPeerId.clear();
+    }
+    emit definitionsChanged();
+    emit allAssignmentsRefreshed();
+}
+
+void RoleStore::clearAssignmentsAndUsers(bool keepLocalPeerId) {
+    client::p2p::PeerRoleAssignment localAssignment;
+    QString localUsername;
+    bool hasLocalAssignment = false;
+    QString localId;
+    {
+        QWriteLocker locker(&storeLock);
+        localId = localPeerId;
+        if (!localId.isEmpty()) {
+            auto it = peerAssignments.find(localId);
+            if (it != peerAssignments.end()) {
+                localAssignment    = it.value();
+                hasLocalAssignment = true;
+            }
+            localUsername = peerUsernames.value(localId);
+        }
+        peerAssignments.clear();
+        peerUsernames.clear();
+        if (!keepLocalPeerId) {
+            localPeerId.clear();
+        } else if (!localId.isEmpty()) {
+            if (hasLocalAssignment) {
+                peerAssignments.insert(localId, localAssignment);
+            }
+            if (!localUsername.isEmpty()) {
+                peerUsernames.insert(localId, localUsername);
+            }
+        }
+    }
+    emit allAssignmentsRefreshed();
+}
+
+void RoleStore::setLocalDefaultRole(const QString& roleName) {
+    const QString localId = getLocalPeerId();
+    if (localId.isEmpty() || roleName.isEmpty())
+        return;
+
+    const QString roleKey = roleName.toLower();
+    {
+        QReadLocker defsLocker(&storeLock);
+        if (!roleDefinitions.contains(roleKey))
+            return;
+    }
+
+    client::p2p::PeerRoleAssignment assignment;
+    assignment.set_peer_id(localId.toStdString());
+    assignment.add_assigned_role_names(roleKey.toStdString());
+    assignment.set_hlc_ts(QDateTime::currentMSecsSinceEpoch());
+
+    {
+        QWriteLocker locker(&storeLock);
+        peerAssignments.insert(localId, assignment);
+    }
+
+    emit peerRolesChanged(localId);
+    emit allAssignmentsRefreshed();
 }
 
 } // namespace Roles

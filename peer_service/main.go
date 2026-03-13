@@ -149,6 +149,19 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 	s.sendInitialState(stream)
 
 	defer func() {
+		// Notify session peers that this node left (best-effort)
+		currentSessionID := s.node.GetCurrentSessionID()
+		if currentSessionID != "" && currentSessionID != "default" {
+			peerLeft := &p2ppb.PeerLeft{
+				PeerId: nodeIDStr,
+				Reason: "disconnect",
+				HlcTs:  common.GetCurrentHLC(),
+			}
+			serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerLeft{PeerLeft: peerLeft}}
+			if err := s.publishToControlTopic(context.Background(), serverPayload); err != nil {
+				log.Printf("ControlStream: Failed to publish PeerLeft for %s: %v", nodeIDStr, err)
+			}
+		}
 		s.hub.Remove(nodeIDStr)
 		log.Printf("Client connection associated with node %s removed from hub.", nodeIDStr)
 	}()
@@ -190,6 +203,15 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_ChatCmd); ok {
 			hlc = cmdPl.ChatCmd.HlcTs
 			cmdTypeString = fmt.Sprintf("ChatCmd (Text: '%.20s...')", cmdPl.ChatCmd.Text)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_ChatDeleteCmd); ok {
+			hlc = cmdPl.ChatDeleteCmd.HlcTs
+			cmdTypeString = fmt.Sprintf("ChatDeleteCmd (MessageID: %s)", cmdPl.ChatDeleteCmd.MessageId)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_KickPeerCmd); ok {
+			hlc = cmdPl.KickPeerCmd.HlcTs
+			cmdTypeString = fmt.Sprintf("KickPeerCmd (Target: %s)", cmdPl.KickPeerCmd.TargetPeerId)
+		} else if cmdPl, ok := clientMsg.Payload.(*clientpb.ClientMsg_BanPeerCmd); ok {
+			hlc = cmdPl.BanPeerCmd.HlcTs
+			cmdTypeString = fmt.Sprintf("BanPeerCmd (Target: %s)", cmdPl.BanPeerCmd.TargetPeerId)
 		} else {
 			cmdTypeString = fmt.Sprintf("Unknown type %T", clientMsg.Payload)
 		}
@@ -323,6 +345,35 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 				log.Printf("Error sending CreateSessionResponse: %v", errSend)
 			}
 			continue // Successfully handled, move to next client message
+
+		case *clientpb.ClientMsg_LeaveSessionRequest:
+			req := cmd.LeaveSessionRequest
+			log.Printf("[gRPC Recv %s] LeaveSessionRequest: SessionID='%s'", nodeIDStr, req.SessionId)
+
+			currentSessionID := s.node.GetCurrentSessionID()
+			if req.SessionId != "" && currentSessionID != req.SessionId {
+				log.Printf("LeaveSessionRequest ignored: current session '%s' does not match requested '%s'", currentSessionID, req.SessionId)
+				continue
+			}
+
+			if currentSessionID != "" && currentSessionID != "default" {
+				if s.sessionManager != nil {
+					_, _, _ = s.sessionManager.RemovePeerFromSession(currentSessionID, senderID)
+				}
+				peerLeft := &p2ppb.PeerLeft{
+					PeerId: senderID.String(),
+					Reason: "leave",
+					HlcTs:  common.GetCurrentHLC(),
+				}
+				serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerLeft{PeerLeft: peerLeft}}
+				_ = s.publishToControlTopic(stream.Context(), serverPayload)
+			}
+
+			if err := s.node.JoinSessionTopics("default"); err != nil {
+				log.Printf("LeaveSessionRequest: Failed to join default topics: %v", err)
+			}
+			s.node.SetCurrentSessionID("default")
+			continue
 
 		case *clientpb.ClientMsg_JoinSessionRequest:
 			req := cmd.JoinSessionRequest
@@ -853,6 +904,11 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			continue
 
 		case *clientpb.ClientMsg_QueueCmd:
+			currentSessionID := s.node.GetCurrentSessionID()
+			if currentSessionID == "" {
+				log.Printf("[gRPC Denied %s] QueueCmd denied: no active session (HLC: %d)", nodeIDStr, cmd.QueueCmd.HlcTs)
+				continue
+			}
 			if err := s.queueCtrl.Handle(stream.Context(), cmd.QueueCmd, senderID, s.roleManager, s.hub, s.node, s.node.CtrlTopic()); err != nil {
 				log.Printf("Error handling QueueCmd from %s: %v", nodeIDStr, err)
 			}
@@ -913,6 +969,18 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 
 			// Publish to chat topic
 			_ = s.publishToChatTopic(stream.Context(), serverPayload) // Error already logged by helper
+
+		case *clientpb.ClientMsg_ChatDeleteCmd:
+			log.Printf("[gRPC Recv %s] Processing ChatDeleteCmd: MessageID='%s', HLC: %d", nodeIDStr, cmd.ChatDeleteCmd.MessageId, cmd.ChatDeleteCmd.HlcTs)
+			s.handleChatDeleteCmd(stream.Context(), cmd.ChatDeleteCmd, senderID)
+
+		case *clientpb.ClientMsg_KickPeerCmd:
+			log.Printf("[gRPC Recv %s] Processing KickPeerCmd: Target='%s', HLC: %d", nodeIDStr, cmd.KickPeerCmd.TargetPeerId, cmd.KickPeerCmd.HlcTs)
+			s.handleKickPeerCmd(stream.Context(), cmd.KickPeerCmd, senderID)
+
+		case *clientpb.ClientMsg_BanPeerCmd:
+			log.Printf("[gRPC Recv %s] Processing BanPeerCmd: Target='%s', HLC: %d", nodeIDStr, cmd.BanPeerCmd.TargetPeerId, cmd.BanPeerCmd.HlcTs)
+			s.handleBanPeerCmd(stream.Context(), cmd.BanPeerCmd, senderID)
 
 		default:
 			log.Printf("[gRPC Recv %s] Unhandled ClientMsg payload type: %T", nodeIDStr, clientMsg.Payload)
@@ -1045,6 +1113,18 @@ func (s *server) handleAuthStream(stream network.Stream) {
 	if session.AdminPeerID != s.node.ID() {
 		log.Printf("Admin: Auth attempt for session %s, but this peer (%s) is not the admin (%s). Denying.", authReq.GetSessionId(), s.node.ID(), session.AdminPeerID)
 		errResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String("Authorization failed: not session admin.")}
+		errRespBytes, _ := proto.Marshal(errResp)
+		_, _ = stream.Write(errRespBytes) // Best effort
+		return
+	}
+
+	if banned, banInfo := s.sessionManager.IsPeerBanned(session.ID, remotePeerID); banned {
+		log.Printf("Admin: Auth attempt from banned peer %s for session %s. Denying.", remotePeerID, session.ID)
+		errMsg := "You are banned from this session."
+		if banInfo.Reason != "" {
+			errMsg = fmt.Sprintf("You are banned from this session. Reason: %s", banInfo.Reason)
+		}
+		errResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
 		errRespBytes, _ := proto.Marshal(errResp)
 		_, _ = stream.Write(errRespBytes) // Best effort
 		return
@@ -1266,6 +1346,189 @@ func (s *server) handleRemoveRoleCmd(ctx context.Context, cmd *p2ppb.RemoveRoleC
 	}
 }
 
+func (s *server) handleChatDeleteCmd(ctx context.Context, cmd *p2ppb.ChatDeleteCmd, senderID peer.ID) {
+	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+	if !senderPerms.Has(roles.PermModerateChat) {
+		log.Printf("Permission denied: Peer %s lacks PermModerateChat to delete chat messages (Cmd HLC: %d)", senderID, cmd.HlcTs)
+		return
+	}
+
+	if cmd.MessageId == "" {
+		log.Printf("ChatDeleteCmd missing message_id from %s (Cmd HLC: %d)", senderID, cmd.HlcTs)
+		return
+	}
+
+	hlc := cmd.HlcTs
+	if hlc == 0 {
+		hlc = common.GetCurrentHLC()
+	}
+
+	deleteMsg := &p2ppb.ChatDeleteMsg{
+		MessageId: cmd.MessageId,
+		DeletedBy: senderID.String(),
+		HlcTs:     hlc,
+	}
+	serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_ChatDeleteMsg{ChatDeleteMsg: deleteMsg}}
+
+	// Broadcast to local hub for immediate UI update
+	s.hub.Broadcast(serverPayload)
+	// Publish to chat topic so all peers receive the deletion
+	if err := s.publishToChatTopic(ctx, serverPayload); err != nil {
+		log.Printf("Failed to publish ChatDeleteMsg to chat topic: %v", err)
+	}
+}
+
+func (s *server) handleKickPeerCmd(ctx context.Context, cmd *p2ppb.KickPeerCmd, senderID peer.ID) {
+	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+	if !senderPerms.Has(roles.PermKickUser) {
+		log.Printf("Permission denied: Peer %s lacks PermKickUser to kick %s (Cmd HLC: %d)", senderID, cmd.TargetPeerId, cmd.HlcTs)
+		return
+	}
+
+	if cmd.TargetPeerId == "" {
+		log.Printf("KickPeerCmd missing target_peer_id from %s (Cmd HLC: %d)", senderID, cmd.HlcTs)
+		return
+	}
+
+	if cmd.TargetPeerId == senderID.String() {
+		log.Printf("KickPeerCmd rejected: %s cannot kick self", senderID)
+		return
+	}
+
+	targetPeerID, err := peer.Decode(cmd.TargetPeerId)
+	if err != nil {
+		log.Printf("KickPeerCmd invalid target_peer_id '%s' from %s: %v", cmd.TargetPeerId, senderID, err)
+		return
+	}
+
+	currentSessionID := s.node.GetCurrentSessionID()
+	if currentSessionID == "" || currentSessionID == "default" {
+		log.Printf("KickPeerCmd rejected: No active session for %s", senderID)
+		return
+	}
+
+	session, exists := s.sessionManager.GetSession(currentSessionID)
+	if !exists {
+		log.Printf("KickPeerCmd rejected: Session %s not found", currentSessionID)
+		return
+	}
+
+	if session.AdminPeerID == targetPeerID && senderID != session.AdminPeerID {
+		log.Printf("KickPeerCmd rejected: %s cannot kick session admin %s", senderID, targetPeerID)
+		return
+	}
+
+	if !s.sessionManager.IsPeerInSession(currentSessionID, targetPeerID) {
+		log.Printf("KickPeerCmd rejected: target %s not in session %s", targetPeerID, currentSessionID)
+		return
+	}
+
+	_, removed, err := s.sessionManager.RemovePeerFromSession(currentSessionID, targetPeerID)
+	if err != nil {
+		log.Printf("KickPeerCmd failed: %v", err)
+		return
+	}
+	if !removed {
+		log.Printf("KickPeerCmd: target %s not found in session %s", targetPeerID, currentSessionID)
+		return
+	}
+
+	if assignmentMsg, err := s.roleManager.SetPeerRoles(targetPeerID, []string{}); err == nil && assignmentMsg != nil {
+		assignmentMsg.HlcTs = common.GetCurrentHLC()
+		assignmentPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
+		s.hub.Broadcast(assignmentPayload)
+		_ = s.publishToControlTopic(ctx, assignmentPayload)
+	}
+
+	hlc := cmd.HlcTs
+	if hlc == 0 {
+		hlc = common.GetCurrentHLC()
+	}
+
+	peerKicked := &p2ppb.PeerKicked{
+		PeerId:   targetPeerID.String(),
+		IssuedBy: senderID.String(),
+		Reason:   cmd.Reason,
+		HlcTs:    hlc,
+	}
+	serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerKicked{PeerKicked: peerKicked}}
+	s.hub.Broadcast(serverPayload)
+	_ = s.publishToControlTopic(ctx, serverPayload)
+}
+
+func (s *server) handleBanPeerCmd(ctx context.Context, cmd *p2ppb.BanPeerCmd, senderID peer.ID) {
+	senderPerms := s.roleManager.GetPermissionsForPeer(senderID)
+	if !senderPerms.Has(roles.PermBanUser) {
+		log.Printf("Permission denied: Peer %s lacks PermBanUser to ban %s (Cmd HLC: %d)", senderID, cmd.TargetPeerId, cmd.HlcTs)
+		return
+	}
+
+	if cmd.TargetPeerId == "" {
+		log.Printf("BanPeerCmd missing target_peer_id from %s (Cmd HLC: %d)", senderID, cmd.HlcTs)
+		return
+	}
+
+	if cmd.TargetPeerId == senderID.String() {
+		log.Printf("BanPeerCmd rejected: %s cannot ban self", senderID)
+		return
+	}
+
+	targetPeerID, err := peer.Decode(cmd.TargetPeerId)
+	if err != nil {
+		log.Printf("BanPeerCmd invalid target_peer_id '%s' from %s: %v", cmd.TargetPeerId, senderID, err)
+		return
+	}
+
+	currentSessionID := s.node.GetCurrentSessionID()
+	if currentSessionID == "" || currentSessionID == "default" {
+		log.Printf("BanPeerCmd rejected: No active session for %s", senderID)
+		return
+	}
+
+	session, exists := s.sessionManager.GetSession(currentSessionID)
+	if !exists {
+		log.Printf("BanPeerCmd rejected: Session %s not found", currentSessionID)
+		return
+	}
+
+	if session.AdminPeerID == targetPeerID && senderID != session.AdminPeerID {
+		log.Printf("BanPeerCmd rejected: %s cannot ban session admin %s", senderID, targetPeerID)
+		return
+	}
+
+	if !s.sessionManager.IsPeerInSession(currentSessionID, targetPeerID) {
+		log.Printf("BanPeerCmd rejected: target %s not in session %s", targetPeerID, currentSessionID)
+		return
+	}
+
+	banHlc := cmd.HlcTs
+	if banHlc == 0 {
+		banHlc = common.GetCurrentHLC()
+	}
+
+	if _, err := s.sessionManager.BanPeer(currentSessionID, targetPeerID, senderID, cmd.Reason, banHlc); err != nil {
+		log.Printf("BanPeerCmd failed: %v", err)
+		return
+	}
+
+	if assignmentMsg, err := s.roleManager.SetPeerRoles(targetPeerID, []string{}); err == nil && assignmentMsg != nil {
+		assignmentMsg.HlcTs = common.GetCurrentHLC()
+		assignmentPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
+		s.hub.Broadcast(assignmentPayload)
+		_ = s.publishToControlTopic(ctx, assignmentPayload)
+	}
+
+	peerBanned := &p2ppb.PeerBanned{
+		PeerId:   targetPeerID.String(),
+		IssuedBy: senderID.String(),
+		Reason:   cmd.Reason,
+		HlcTs:    banHlc,
+	}
+	serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerBanned{PeerBanned: peerBanned}}
+	s.hub.Broadcast(serverPayload)
+	_ = s.publishToControlTopic(ctx, serverPayload)
+}
+
 // mdnsNotifee prints every peer it discovers on the LAN.
 type mdnsNotifee struct {
 	h   host.Host
@@ -1469,6 +1732,38 @@ func processControlTopicMessages(ctx context.Context, sub *pubsub.Subscription, 
 			handleGossipPlaybackStateCmd(payload.PlaybackStateCmd, msg.ReceivedFrom, srv)
 		case *clientpb.ServerMsg_LocalPeerIdentity:
 			handleGossipLocalPeerIdentity(payload.LocalPeerIdentity, msg.ReceivedFrom, srv)
+		case *clientpb.ServerMsg_PeerKicked:
+			log.Printf("[gossip Ctrl] PeerKicked received for %s from %s", payload.PeerKicked.PeerId, msg.ReceivedFrom)
+			if payload.PeerKicked.PeerId == myID.String() {
+				log.Printf("[gossip Ctrl] Local peer was kicked. Leaving session topics.")
+				if err := srv.node.JoinSessionTopics("default"); err != nil {
+					log.Printf("[gossip Ctrl] Failed to join default topics after kick: %v", err)
+				}
+				srv.node.SetCurrentSessionID("default")
+				if assignmentMsg, err := srv.roleManager.SetPeerRoles(myID, []string{"Admin"}); err == nil && assignmentMsg != nil {
+					assignmentMsg.HlcTs = common.GetCurrentHLC()
+					serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
+					srv.hub.Broadcast(serverPayload)
+				}
+			}
+			srv.hub.Broadcast(&serverMsg)
+		case *clientpb.ServerMsg_PeerBanned:
+			log.Printf("[gossip Ctrl] PeerBanned received for %s from %s", payload.PeerBanned.PeerId, msg.ReceivedFrom)
+			if payload.PeerBanned.PeerId == myID.String() {
+				log.Printf("[gossip Ctrl] Local peer was banned. Leaving session topics.")
+				if err := srv.node.JoinSessionTopics("default"); err != nil {
+					log.Printf("[gossip Ctrl] Failed to join default topics after ban: %v", err)
+				}
+				srv.node.SetCurrentSessionID("default")
+				if assignmentMsg, err := srv.roleManager.SetPeerRoles(myID, []string{"Admin"}); err == nil && assignmentMsg != nil {
+					assignmentMsg.HlcTs = common.GetCurrentHLC()
+					serverPayload := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerRoleAssignment{PeerRoleAssignment: assignmentMsg}}
+					srv.hub.Broadcast(serverPayload)
+				}
+			}
+			srv.hub.Broadcast(&serverMsg)
+		case *clientpb.ServerMsg_PeerLeft:
+			handleGossipPeerLeft(payload.PeerLeft, msg.ReceivedFrom, srv)
 		default:
 			log.Printf("[gossip Ctrl] processControlTopicMessages: received unhandled ServerMsg payload type %T from %s", payload, msg.ReceivedFrom)
 		}
@@ -1505,16 +1800,24 @@ func processChatTopicMessages(ctx context.Context, sub *pubsub.Subscription, srv
 			continue
 		}
 
-		if chatPayload, ok := serverMsg.GetPayload().(*clientpb.ServerMsg_ChatMsg); ok {
-			if chatPayload.ChatMsg.HlcTs > 0 {
-				common.UpdateHLC(chatPayload.ChatMsg.HlcTs)
+		switch payload := serverMsg.GetPayload().(type) {
+		case *clientpb.ServerMsg_ChatMsg:
+			if payload.ChatMsg.HlcTs > 0 {
+				common.UpdateHLC(payload.ChatMsg.HlcTs)
 			}
 			log.Printf("[gossip ChatRecv] Received ChatMsg (ID: %s, Sender: %s, Text: '%.20s...', HLC: %d) from %s. Broadcasting to local hub.",
-				chatPayload.ChatMsg.MessageId, chatPayload.ChatMsg.Sender, chatPayload.ChatMsg.Text, chatPayload.ChatMsg.HlcTs, msg.ReceivedFrom)
+				payload.ChatMsg.MessageId, payload.ChatMsg.Sender, payload.ChatMsg.Text, payload.ChatMsg.HlcTs, msg.ReceivedFrom)
 			// Forward the *entire* ServerMsg (which wraps ChatMsg) to local GUI clients
 			srv.hub.Broadcast(&serverMsg)
-		} else {
-			log.Printf("[gossip Chat] received non-ChatMsg payload on chat topic from %s: %T", msg.ReceivedFrom, serverMsg.GetPayload())
+		case *clientpb.ServerMsg_ChatDeleteMsg:
+			if payload.ChatDeleteMsg.HlcTs > 0 {
+				common.UpdateHLC(payload.ChatDeleteMsg.HlcTs)
+			}
+			log.Printf("[gossip ChatRecv] Received ChatDeleteMsg (MessageID: %s, DeletedBy: %s, HLC: %d) from %s. Broadcasting to local hub.",
+				payload.ChatDeleteMsg.MessageId, payload.ChatDeleteMsg.DeletedBy, payload.ChatDeleteMsg.HlcTs, msg.ReceivedFrom)
+			srv.hub.Broadcast(&serverMsg)
+		default:
+			log.Printf("[gossip Chat] received non-chat payload on chat topic from %s: %T", msg.ReceivedFrom, serverMsg.GetPayload())
 		}
 	}
 }
@@ -1575,6 +1878,32 @@ func handleGossipPeerRoleAssignment(assignment *p2ppb.PeerRoleAssignment, from p
 			srv.node.ReactToQueueUpdate()
 		}
 	}
+}
+
+func handleGossipPeerLeft(left *p2ppb.PeerLeft, from peer.ID, srv *server) {
+	log.Printf("[gossip Ctrl] handleGossipPeerLeft: peer %s left (HLC: %d) from %s", left.PeerId, left.HlcTs, from)
+	if left.HlcTs > 0 {
+		common.UpdateHLC(left.HlcTs)
+	}
+	targetPeerID, err := peer.Decode(left.PeerId)
+	if err != nil {
+		log.Printf("[gossip Ctrl] Invalid peer ID '%s' in PeerLeft from %s: %v", left.PeerId, from, err)
+		return
+	}
+
+	if _, err := srv.roleManager.ApplyPeerAssignment(targetPeerID, []string{}, left.HlcTs); err != nil {
+		log.Printf("[gossip Ctrl] Error applying PeerLeft for %s from %s: %v", targetPeerID, from, err)
+	}
+
+	if srv.sessionManager != nil {
+		currentSessionID := srv.node.GetCurrentSessionID()
+		if currentSessionID != "" && currentSessionID != "default" {
+			_, _, _ = srv.sessionManager.RemovePeerFromSession(currentSessionID, targetPeerID)
+		}
+	}
+
+	serverMsg := &clientpb.ServerMsg{Payload: &clientpb.ServerMsg_PeerLeft{PeerLeft: left}}
+	srv.hub.Broadcast(serverMsg)
 }
 
 func handleGossipAllPeerRoleAssignments(snapshot *p2ppb.AllPeerRoleAssignments, from peer.ID, srv *server) {

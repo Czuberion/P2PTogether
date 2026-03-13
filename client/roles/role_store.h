@@ -45,6 +45,10 @@ public:
     QVector<QString> getKnownPeerIds() const;
     void storePeerUsername(const QString& peerId, const QString& username);
     QString getPeerUsername(const QString& peerId) const;
+    void removePeer(const QString& peerId);
+    void clearAll();
+    void clearAssignmentsAndUsers(bool keepLocalPeerId = true);
+    void setLocalDefaultRole(const QString& roleName);
     // Gets assigned role names for a peer
     QVector<QString> getAssignedRoleNames(const QString& peerId) const;
     // Gets the HLC timestamp of a peer's last role assignment

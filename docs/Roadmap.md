@@ -1,4 +1,3 @@
-- [ ] Review, refactor, and commit latest features (moderation, chat, etc.)
 - [ ] Fix remaining build issues
 - [ ] Check exact dependencies and versions
 - [ ] Switch HLS implementation

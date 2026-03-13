@@ -11,6 +11,15 @@ type UserInfo struct {
 	PeerID   peer.ID  // The libp2p PeerID of the user
 }
 
+// BanInfo stores information about a banned peer within a session.
+type BanInfo struct {
+	PeerID   peer.ID
+	Username string
+	BannedBy peer.ID
+	Reason   string
+	BannedAt int64
+}
+
 // Session represents an active P2PTogether session.
 type Session struct {
 	ID          string // Unique Session ID (UUID v4 string)
@@ -23,6 +32,9 @@ type Session struct {
 	// Keyed by peer.ID.String() for easier map keying if direct peer.ID causes issues,
 	// but peer.ID itself is generally fine as a map key.
 	Members map[peer.ID]UserInfo
+
+	// Banned tracks peers that are not allowed to join the session.
+	Banned map[peer.ID]BanInfo
 
 	// mu sync.RWMutex // Use if Session fields (like Members) are modified directly by multiple goroutines.
 	// For now, SessionManager will manage concurrent access to its map of sessions, and

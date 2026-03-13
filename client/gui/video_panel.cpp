@@ -142,7 +142,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     skipBackBtn->setObjectName("skipBackBtn");
     controlLayout->addWidget(skipBackBtn);
     QObject::connect(skipBackBtn, &QPushButton::clicked, [worker, app]() {
-        if (!worker || !app)
+        if (!worker || !app || app->getCurrentSessionId().isEmpty())
             return;
         client::ClientMsg msg;
         auto* cmd = msg.mutable_queue_cmd();
@@ -158,7 +158,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     rewindBtn->setToolTip("Rewind 5 seconds");
     QObject::connect(
         rewindBtn, &QPushButton::clicked, [mpvWidget, worker, app]() {
-            if (!mpvWidget)
+            if (!mpvWidget || !app || app->getCurrentSessionId().isEmpty())
                 return;
             double currentPos, currentSpeed;
             bool currentIsPlaying;
@@ -185,7 +185,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     QObject::connect(
         playPauseBtn, &QPushButton::clicked,
         [mpvWidget, worker, playPauseBtn, app]() {
-            if (!mpvWidget)
+            if (!mpvWidget || !app || app->getCurrentSessionId().isEmpty())
                 return;
             double currentPos, currentSpeed;
             bool currentIsPlaying;
@@ -207,7 +207,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     fastForwardBtn->setToolTip("Fast forward 5 seconds");
     QObject::connect(
         fastForwardBtn, &QPushButton::clicked, [mpvWidget, worker, app]() {
-            if (!mpvWidget)
+            if (!mpvWidget || !app || app->getCurrentSessionId().isEmpty())
                 return;
             double currentPos, currentSpeed;
             bool currentPlaying;
@@ -231,7 +231,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     skipForwardBtn->setObjectName("skipForwardBtn");
     controlLayout->addWidget(skipForwardBtn);
     QObject::connect(skipForwardBtn, &QPushButton::clicked, [worker, app]() {
-        if (!worker || !app)
+        if (!worker || !app || app->getCurrentSessionId().isEmpty())
             return;
         client::ClientMsg msg;
         auto* cmd = msg.mutable_queue_cmd();
@@ -250,7 +250,7 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     QObject::connect(
         stopButton, &QPushButton::clicked,
         [mpvWidget, worker, playPauseBtn, app]() {
-            if (!mpvWidget)
+            if (!mpvWidget || !app || app->getCurrentSessionId().isEmpty())
                 return;
             double _pos, currentSpeed;
             bool _playing;
