@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -554,8 +555,12 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 					tempStream.Close()
 					exchangeCancel()
 
-					if err != nil {
+					if err != nil && !(err == io.EOF && n > 0) {
 						log.Printf("Peer exchange: No response from peer %s: %v", connectedPeer, err)
+						continue
+					}
+					if n == 0 {
+						log.Printf("Peer exchange: Empty response from peer %s", connectedPeer)
 						continue
 					}
 
@@ -625,7 +630,7 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 						testStream.Close()
 						testCancel()
 
-						if err == nil && n > 0 {
+						if (err == nil || (err == io.EOF && n > 0)) && n > 0 {
 							var authResp p2ppb.JoinSessionResponse
 							if proto.Unmarshal(respBuf[:n], &authResp) == nil {
 								if authResp.ErrorMessage == nil || !strings.Contains(*authResp.ErrorMessage, "Session not found") {
@@ -859,13 +864,23 @@ func (s *server) ControlStream(stream clientpb.P2PTClient_ControlStreamServer) e
 			// --- Read JoinSessionResponse from Admin ---
 			authRespBuf := make([]byte, 4096) // Adjust buffer size if snapshot is larger
 			authRespN, err := authStream.Read(authRespBuf)
-			if err != nil {
+			if err != nil && !(err == io.EOF && authRespN > 0) {
 				errMsg := fmt.Sprintf("Failed to read JoinSessionResponse from Admin %s: %v", adminInfo.ID, err)
 				log.Println(errMsg)
 				// Send error to GUI
 				guiResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
 				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: guiResp}}); errSend != nil {
 					log.Printf("Error sending JoinSession error response (auth read failed): %v", errSend)
+				}
+				authStream.Reset()
+				continue
+			}
+			if authRespN == 0 {
+				errMsg := fmt.Sprintf("Failed to read JoinSessionResponse from Admin %s: empty response", adminInfo.ID)
+				log.Println(errMsg)
+				guiResp := &p2ppb.JoinSessionResponse{ErrorMessage: proto.String(errMsg)}
+				if errSend := stream.Send(&clientpb.ServerMsg{Payload: &clientpb.ServerMsg_JoinSessionResponse{JoinSessionResponse: guiResp}}); errSend != nil {
+					log.Printf("Error sending JoinSession error response (auth empty read): %v", errSend)
 				}
 				authStream.Reset()
 				continue
@@ -1086,10 +1101,14 @@ func (s *server) handleAuthStream(stream network.Stream) {
 	// For larger messages, use a buffered reader or length-prefixing.
 	buf := make([]byte, 1024) // Max AuthRequest size
 	n, err := stream.Read(buf)
-	if err != nil {
+	if err != nil && !(err == io.EOF && n > 0) {
 		log.Printf("Admin: Error reading AuthRequest from %s: %v", remotePeerID, err)
 		// Cannot send a JoinSessionResponse here easily if read fails before unmarshalling.
 		// The Joiner will experience a stream read error or timeout.
+		return
+	}
+	if n == 0 {
+		log.Printf("Admin: Empty AuthRequest from %s", remotePeerID)
 		return
 	}
 
@@ -1539,6 +1558,7 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	if pi.ID == n.h.ID() {
 		return // ignore ourselves
 	}
+	pi.Addrs = sortAddressesLocalFirst(pi.Addrs)
 	log.Printf("[mDNS] discovered %s with addrs: %v\n", pi.ID, pi.Addrs)
 
 	// Always add addresses to peerstore so they're available for later connection attempts.
@@ -1565,10 +1585,10 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT, *drouting.RoutingDiscovery) {
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(
+			"/ip4/0.0.0.0/udp/0/quic-v1",
+			"/ip6/::/udp/0/quic-v1",
 			"/ip4/0.0.0.0/tcp/0",
-			"/ip4/0.0.0.0/udp/0/quic",
 			"/ip6/::/tcp/0",
-			"/ip6/::/udp/0/quic",
 		),
 		libp2p.EnableNATService(),
 		libp2p.NATPortMap(),
@@ -1602,6 +1622,7 @@ func buildHost(ctx context.Context) (host.Host, *dht.IpfsDHT, *drouting.RoutingD
 		wg.Add(1)
 		go func(pi peer.AddrInfo) {
 			defer wg.Done()
+			pi.Addrs = sortAddressesLocalFirst(pi.Addrs)
 			// Use a timeout for each connection attempt to avoid indefinite blocking.
 			connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
@@ -1669,26 +1690,42 @@ func (s *server) maybeStartMdns() {
 	startMdnsDiscovery(s.node, s.dht) // Node embeds host.Host
 }
 
+func isQUICAddr(addr ma.Multiaddr) bool {
+	// Match both /quic and /quic-v1 style multiaddrs.
+	return strings.Contains(addr.String(), "/quic")
+}
+
 // sortAddressesLocalFirst sorts multiaddresses to prioritize private/local IP addresses
-// over public IPs. This helps when both peers are on the same LAN behind NAT - we want
-// to try the local addresses first since the public NAT IP may not be reachable.
+// over public IPs and QUIC-capable addresses over non-QUIC addresses.
+// This favors low-latency local paths and pushes media/control traffic onto QUIC transports.
 func sortAddressesLocalFirst(addrs []ma.Multiaddr) []ma.Multiaddr {
-	localAddrs := make([]ma.Multiaddr, 0)
-	publicAddrs := make([]ma.Multiaddr, 0)
+	localQuic := make([]ma.Multiaddr, 0)
+	localOther := make([]ma.Multiaddr, 0)
+	publicQuic := make([]ma.Multiaddr, 0)
+	publicOther := make([]ma.Multiaddr, 0)
 
 	for _, addr := range addrs {
-		// Check if this is a private/local address
-		if manet.IsPrivateAddr(addr) {
-			localAddrs = append(localAddrs, addr)
-		} else {
-			publicAddrs = append(publicAddrs, addr)
+		isLocal := manet.IsPrivateAddr(addr)
+		isQuic := isQUICAddr(addr)
+
+		switch {
+		case isLocal && isQuic:
+			localQuic = append(localQuic, addr)
+		case isLocal && !isQuic:
+			localOther = append(localOther, addr)
+		case !isLocal && isQuic:
+			publicQuic = append(publicQuic, addr)
+		default:
+			publicOther = append(publicOther, addr)
 		}
 	}
 
-	// Return local addresses first, then public addresses
+	// Priority: local+QUIC, local+other, public+QUIC, public+other.
 	result := make([]ma.Multiaddr, 0, len(addrs))
-	result = append(result, localAddrs...)
-	result = append(result, publicAddrs...)
+	result = append(result, localQuic...)
+	result = append(result, localOther...)
+	result = append(result, publicQuic...)
+	result = append(result, publicOther...)
 	return result
 }
 

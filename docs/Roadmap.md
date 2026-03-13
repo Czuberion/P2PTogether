@@ -2,7 +2,7 @@
 - [ ] Check exact dependencies and versions
 - [ ] Switch HLS implementation
 - [ ] Enhance peer discovery
-- [ ] Switch to UDP/QUIC for segment propagation
+- [x] Switch to QUIC transport
 - [x] Change segment transcoding for lower latency
 - [ ] Refactor Peer Service architecture
 - [x] Investigate latency issues
