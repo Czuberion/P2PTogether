@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // DurationProvider is an interface that can provide the actual duration for a segment.
@@ -50,41 +49,14 @@ func IngestHandler(rb *RingBuffer, durationGetter DurationProvider) http.Handler
 		// var actualDuration float64 = SegmentDuration.Seconds() // Default to nominal
 		pts := 0.0 // Assuming PTS for now
 
-		var actualDuration float64
-		var durationFound bool
-
-		// Polling loop for duration with timeout
-		// This timeout should be fairly short, as ffmpeg should update its M3U8 quickly.
-		timeout := time.After(500 * time.Millisecond)         // e.g., 500ms timeout
-		pollInterval := time.NewTicker(20 * time.Millisecond) // Poll frequently
-		defer pollInterval.Stop()
-
-	getDurationLoop:
-		for {
-			select {
-			case <-timeout:
-				log.Printf("[IngestHandler-Sync] Timeout waiting for precise duration for segment %d. Using nominal.", seq)
-				actualDuration = SegmentDuration.Seconds() // Nominal duration
-				durationFound = false                      // Mark as not precisely found
-				break getDurationLoop
-			case <-pollInterval.C:
-				if durationGetter != nil {
-					currentDur, found := durationGetter.GetActualSegmentDuration(uint32(seq))
-					if found {
-						// log.Printf("[IngestHandler-Sync] Precise duration %.6f found for segment %d.", currentDur, seq)
-						actualDuration = currentDur
-						durationFound = true
-						break getDurationLoop
-					}
-					// else, log.Printf("[IngestHandler-Sync] Poll: Duration for seg %d not yet available from monitor.", seq)
-				} else {
-					// This case should ideally not happen if IngestHandler is on the streamer node
-					// and the srvInstance.node was correctly passed as durationGetter.
-					log.Printf("[IngestHandler-Sync] No duration getter available for segment %d. Using nominal.", seq)
-					actualDuration = SegmentDuration.Seconds()
-					durationFound = false
-					break getDurationLoop
-				}
+		// Keep ingest hot-path non-blocking. Waiting for M3U8 monitor data here can
+		// reorder segment writes under concurrent PUTs and delay nextSeq updates.
+		actualDuration := SegmentDuration.Seconds()
+		durationFound := false
+		if durationGetter != nil {
+			if currentDur, found := durationGetter.GetActualSegmentDuration(uint32(seq)); found && currentDur > 0 {
+				actualDuration = currentDur
+				durationFound = true
 			}
 		}
 

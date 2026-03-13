@@ -35,6 +35,8 @@ func Handler(rb *RingBuffer) (playlist http.HandlerFunc, segment http.HandlerFun
 		buf.WriteString("#EXTM3U\n")
 		buf.WriteString("#EXT-X-VERSION:3\n")
 		buf.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
+		// Hint clients to begin from playlist start, not from live edge.
+		buf.WriteString("#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n")
 		buf.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(SegmentDuration.Seconds())))
 		buf.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", base))
 

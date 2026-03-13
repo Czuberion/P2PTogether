@@ -34,7 +34,10 @@ func DefaultConfig(input string, hlsIngestURL string, playlistPath string) Confi
 
 		// Keeps encoder in sync with wall-clock, avoids initial burst that
 		// could overflow buffers.
-		RealTime: true,
+		// NOTE: Keep -re disabled for now to avoid real-time throttling when
+		// benchmarking file inputs. Re-enable for live/pipe inputs when we want
+		// wall-clock pacing again.
+		RealTime: false,
 
 		// 2-second chunks keep ring-buffer memory small and latency down
 		// while still giving mpv enough data to pre-buffer.
@@ -122,5 +125,5 @@ func BuildHLSStreamForHTTPOutput(cfg Config, seqBase uint32) *ffmpeg.Stream {
 
 	// The first argument to Output() is the playlist file path.
 	// This is the path the M3U8Monitor will watch.
-	return inputStream.Output(cfg.PlaylistPath, outputArgs)
+	return inputStream.Output(cfg.PlaylistPath, outputArgs).GlobalArgs("-hide_banner")
 }

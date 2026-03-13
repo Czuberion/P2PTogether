@@ -86,10 +86,10 @@ func (rb *RingBuffer) idxFor(seq uint32) int {
 	if seq < rb.baseSeq || seq >= rb.nextSeq {
 		return -1
 	}
-	// distance behind head:
-	off := rb.nextSeq - seq
-	// head points at next write slot, so back up off steps:
-	idx := (rb.head - int(off) + rb.capacity) % rb.capacity
+	idx := int(seq % uint32(rb.capacity))
+	if rb.buf[idx].Seq != seq || len(rb.buf[idx].Data) == 0 {
+		return -1
+	}
 	return idx
 }
 
@@ -98,10 +98,10 @@ func (rb *RingBuffer) Write(data []byte, pts float64, actualDuration float64) ui
 	defer rb.mu.Unlock()
 
 	seq := rb.nextSeq
+	idx := int(seq % uint32(rb.capacity))
+	rb.buf[idx] = Segment{Seq: seq, Data: data, PTS: pts, Time: rb.now(), ActualDuration: actualDuration}
 	rb.nextSeq++
-
-	rb.buf[rb.head] = Segment{Seq: seq, Data: data, PTS: pts, Time: rb.now(), ActualDuration: actualDuration}
-	rb.head = (rb.head + 1) % rb.capacity
+	rb.head = int(rb.nextSeq % uint32(rb.capacity))
 
 	// Re‑compute the first live sequence: everything older than capacity is gone.
 	if rb.nextSeq > uint32(rb.capacity) {
@@ -150,25 +150,37 @@ func (rb *RingBuffer) Get(seq uint32) []byte {
 func (rb *RingBuffer) WriteAt(seq uint32, data []byte, pts float64, actualDuration float64) {
 	rb.mu.Lock()
 
-	// place the segment at the current head
-	rb.buf[rb.head] = Segment{
+	if rb.capacity <= 0 {
+		rb.mu.Unlock()
+		return
+	}
+
+	// Keep nextSeq monotonic first so base/eviction math is consistent.
+	if seq >= rb.nextSeq {
+		rb.nextSeq = seq + 1
+	}
+
+	// Evict anything older than capacity.
+	if rb.nextSeq > uint32(rb.capacity) {
+		rb.baseSeq = rb.nextSeq - uint32(rb.capacity)
+	}
+
+	// Too old for the current window.
+	if seq < rb.baseSeq {
+		rb.mu.Unlock()
+		return
+	}
+
+	// Place segment by sequence number to handle out-of-order arrivals safely.
+	idx := int(seq % uint32(rb.capacity))
+	rb.buf[idx] = Segment{
 		Seq:            seq,
 		Data:           data,
 		PTS:            pts,
 		Time:           rb.now(),
 		ActualDuration: actualDuration,
 	}
-	rb.head = (rb.head + 1) % rb.capacity
-
-	// keep nextSeq monotonic
-	if seq >= rb.nextSeq {
-		rb.nextSeq = seq + 1
-	}
-
-	// evict anything older than capacity
-	if rb.nextSeq > uint32(rb.capacity) {
-		rb.baseSeq = rb.nextSeq - uint32(rb.capacity)
-	}
+	rb.head = int(rb.nextSeq % uint32(rb.capacity))
 
 	shouldPublish := rb.publishEvents // Read under lock
 	rb.mu.Unlock()                    // Unlock before potentially blocking on channel send

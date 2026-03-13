@@ -3,7 +3,7 @@
 - [ ] Switch HLS implementation
 - [ ] Enhance peer discovery
 - [ ] Switch to UDP/QUIC for segment propagation
-- [ ] Change segment transcoding for lower latency
+- [x] Change segment transcoding for lower latency
 - [ ] Refactor Peer Service architecture
 - [ ] Investigate latency issues
 - [ ] Explore auth alternatives

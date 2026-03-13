@@ -43,6 +43,10 @@ MpvWidget::MpvWidget(QWidget* parent, Qt::WindowFlags f) :
     mpv_set_option_string(mpv, "quiet", "yes");
     mpv_set_option_string(mpv, "vo", "libmpv");
     mpv_set_option_string(mpv, "keepaspect", "yes");
+    // For HLS EVENT playlists, FFmpeg's default live_start_index is negative
+    // (near live edge), which can skip early segments when transcoding is fast.
+    // Force playback to start at the first available segment.
+    mpv_set_option_string(mpv, "demuxer-lavf-o", "live_start_index=0");
     if (mpv_initialize(mpv) < 0)
         throw std::runtime_error("could not initialize mpv context");
 

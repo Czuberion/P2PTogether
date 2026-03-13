@@ -103,11 +103,17 @@ QWidget* createVideoPanel(player::MpvManager* mpvManager,
     }
 
     // --- Load the HLS URL ---
-    QObject::connect(mpvManager, &player::MpvManager::playlistReady,
-                     [mpvWidget](const QString& url) {
-                         qInfo() << "Playlist ready, loading HLS URL:" << url;
-                         mpvWidget->command(QStringList() << "loadfile" << url);
-                     });
+    QObject::connect(
+        mpvManager, &player::MpvManager::playlistReady,
+        [mpvWidget](const QString& url) {
+            const QChar sep = url.contains('?') ? '&' : '?';
+            const QString freshUrl =
+                url + sep +
+                "v=" + QString::number(QDateTime::currentMSecsSinceEpoch());
+            qInfo() << "Playlist ready, loading HLS URL:" << freshUrl;
+            mpvWidget->command(QStringList()
+                               << "loadfile" << freshUrl << "replace");
+        });
 
     // Display a “waiting for stream…” overlay until ready:
     QLabel* waiting = new QLabel("Waiting for stream…", mpvWidget);
