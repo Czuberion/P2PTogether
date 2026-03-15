@@ -1,4 +1,4 @@
-- [ ] Fix remaining build issues
+- [x] Fix remaining build issues
 - [ ] Check exact dependencies and versions
 - [ ] Switch HLS implementation
 - [ ] Enhance peer discovery

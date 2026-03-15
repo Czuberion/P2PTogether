@@ -166,7 +166,7 @@ set(PROTO_ROOT "${CMAKE_SOURCE_DIR}/proto")
 set(CLIENT_PROTO "${PROTO_ROOT}/client.proto")
 set(CPP_CLIENT_PROTO_OUT_DIR "${CMAKE_SOURCE_DIR}/client/proto")
 
-file(GLOB_RECURSE ALL_PROTO_FILES
+file(GLOB_RECURSE ALL_PROTO_FILES CONFIGURE_DEPENDS
      "${PROTO_ROOT}/*.proto"
 )
 
@@ -468,7 +468,7 @@ set(GO_SERVICE_BIN
 # Ensure bin directory exists
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-file(GLOB_RECURSE GO_SERVICE_SRCS
+file(GLOB_RECURSE GO_SERVICE_SRCS CONFIGURE_DEPENDS
      ${GO_SERVICE_DIR}/*.go)
 
 add_custom_command(
@@ -488,12 +488,41 @@ add_custom_command(
 add_custom_target(peer_service ALL DEPENDS "${GO_SERVICE_BIN}")
 add_dependencies(peer_service generate_go_client_proto)
 
-# Copy Go binary alongside the C++ executable in each config's output directory
-add_custom_command(TARGET P2PTogether POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${GO_SERVICE_BIN}"
-            "$<TARGET_FILE_DIR:P2PTogether>"
-    COMMENT "Copying peer_service to $<TARGET_FILE_DIR:P2PTogether>")
+# Stage Go binary alongside the C++ executable in each config's output directory.
+# Keep this as a dedicated dependency so it can run even when P2PTogether
+# itself does not relink. A stamp file keeps it incremental.
+set(PEER_SERVICE_STAGE_STAMP "${CMAKE_BINARY_DIR}/peer_service.stage.stamp")
+set(PEER_SERVICE_STAGE_DIRS "")
+if(CMAKE_CONFIGURATION_TYPES)
+    foreach(cfg IN LISTS CMAKE_CONFIGURATION_TYPES)
+        list(APPEND PEER_SERVICE_STAGE_DIRS "${CMAKE_BINARY_DIR}/bin/${cfg}")
+    endforeach()
+elseif(CMAKE_BUILD_TYPE)
+    list(APPEND PEER_SERVICE_STAGE_DIRS "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}")
+else()
+    list(APPEND PEER_SERVICE_STAGE_DIRS "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+set(PEER_SERVICE_STAGE_COMMANDS "")
+foreach(stage_dir IN LISTS PEER_SERVICE_STAGE_DIRS)
+    list(APPEND PEER_SERVICE_STAGE_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${stage_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${GO_SERVICE_BIN}"
+                "${stage_dir}/peer_service${CMAKE_EXECUTABLE_SUFFIX}")
+endforeach()
+
+add_custom_command(
+    OUTPUT "${PEER_SERVICE_STAGE_STAMP}"
+    ${PEER_SERVICE_STAGE_COMMANDS}
+    COMMAND ${CMAKE_COMMAND} -E touch "${PEER_SERVICE_STAGE_STAMP}"
+    DEPENDS "${GO_SERVICE_BIN}"
+    COMMENT "Staging peer_service into runtime output directories"
+    VERBATIM
+)
+
+add_custom_target(stage_peer_service_for_client DEPENDS "${PEER_SERVICE_STAGE_STAMP}")
+add_dependencies(stage_peer_service_for_client peer_service)
 
 # --- FFMPEG Handling ---
 # Find the ffmpeg executable and copy it next to our other binaries post-build
@@ -530,4 +559,4 @@ endif()
 # Ensure proto generation before build
 add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_PROTO_SRCS} ${CPP_PROTO_HDRS})
 add_dependencies(P2PTogether generate_cpp_client_proto)
-add_dependencies(P2PTogether peer_service)
+add_dependencies(P2PTogether stage_peer_service_for_client)
