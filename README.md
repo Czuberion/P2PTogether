@@ -2,13 +2,10 @@
 
 **P2PTogether** is a decentralized, peer-to-peer (P2P) desktop application designed for synchronized video co-watching and real-time user interaction. It eliminates the need for central video distribution servers (relying only on bootstrap nodes for initial discovery) by allowing users to stream local video files directly to others while maintaining synchronized playback and offering tools for community interaction.
 
-> [!NOTE]
-> This project was originally developed for an engineering thesis.
-
 > [!WARNING]
 > This project is in active development and remains in its early stages. It is **not yet production-ready**, so expect breaking changes and experimental features.
 
-## 🚀 Features
+## Features
 
 - **Decentralized P2P Streaming:** Streams local video files directly between peers using an embedded HLS server and `libp2p`-based networking.
 - **Live Playback Synchronization:** Syncs player states across all peers (play, pause, seek, playback speed) to ensure everyone watches the same content simultaneously.
@@ -17,7 +14,7 @@
 - **Real-time Text Chat:** Built-in chat using GossipSub for snappy, decentralized communication.
 - **Moderation Tools:** Kick, ban, message deletion, and dynamic role management to keep watch parties safe and organized.
 
-## 🏗️ Architecture
+## Architecture
 
 The system is built on a two-process architecture offering strict separation of concerns:
 
@@ -25,51 +22,39 @@ The system is built on a two-process architecture offering strict separation of 
    - Acts as the core P2P node.
    - Handles networking logic using [libp2p](https://libp2p.io/).
    - Manages the media pipeline (transcoding via FFmpeg, HLS segmentation, RingBuffer).
-   - Governs session state, RBAC, and the play queue.
+   - Governs session state, RBAC, and the video queue.
 2. **Client Application (C++ / Qt Frontend):**
    - Provides a responsive, native Graphical User Interface (GUI) built with Qt.
    - Renders video efficiently using [libmpv](https://mpv.io/).
    - Communicates with the Daemon via **gRPC**.
 
-## 🛠️ Prerequisites
+## Dependencies
 
 To build and run P2PTogether, you need the following dependencies installed on your system:
 
-- [Go](https://golang.org/) (1.20+)
+- [Go](https://golang.org/) (1.25.7)
 - A modern C++ compiler (GCC, Clang, or MSVC)
 - [FFmpeg](https://ffmpeg.org/) (must be available in the system PATH)
-- [CMake](https://cmake.org/) (3.16+)
-- [Qt 6](https://www.qt.io/) (Widgets module, Network module)
-- [libmpv](https://mpv.io/) development headers
-- [gRPC & Protocol Buffers](https://grpc.io/)
+- [CMake](https://cmake.org/)
+- [Qt 6](https://www.qt.io/)
+- [mpv](https://mpv.io/), libmpv development headers
+- [gRPC](https://grpc.io/)
+- [Protocol Buffers](https://protobuf.dev/)
 
-## ⚙️ Building the Project
+## Building the Project
 
 The project uses CMake to orchestrate the build process for both the C++ frontend and the Go backend automatically. A `CMakePresets.json` is included for convenience with a Ninja Multi-Config generator.
 
 **Available build configurations:** `Debug`, `Release`, `RelWithDebInfo`, `MinSizeRel`
 
-> [!WARNING]
-> **Known issue on freshly cloned repos:** The first build attempt will fail due to protobuf-generated code not being available at initial configure time. This is a temporary issue that will be fixed later.
->
-> **Option A** — configure, let it fail, then configure and build again:
-> ```bash
-> cmake --preset ninja-multi        # 1. Configure
-> cmake --build --preset Release    # 2. Build (will fail — expected)
-> cmake --preset ninja-multi        # 3. Configure again
-> cmake --build --preset Release    # 4. Build (succeeds)
-> ```
->
-> **Option B** — generate protobuf code first, then configure and build (unverified, but should work):
-> ```bash
-> cmake --preset ninja-multi                                              # 1. Configure
-> cmake --build --preset Release --target generate_go_client_proto       # 2. Generate Go proto
-> cmake --build --preset Release --target generate_cpp_client_proto      # 3. Generate C++ proto
-> cmake --preset ninja-multi                                              # 4. Configure again
-> cmake --build --preset Release                                          # 5. Build (succeeds)
-> ```
+Configure and build:
 
-For subsequent builds (after the initial setup), a single build command is sufficient:
+```bash
+cmake --preset ninja-multi
+cmake --build --preset Release
+```
+
+For subsequent builds, a single build command is sufficient:
 
 ```bash
 cmake --build --preset Release
@@ -78,7 +63,7 @@ cmake --build --preset Release
 > [!NOTE]
 > CMake will automatically invoke `go build` to compile the `peer_service` daemon and copy it alongside the `P2PTogether` executable in the selected configuration's output directory (e.g., `build/bin/Release/`).
 
-## 📖 Usage
+## Usage
 
 1. Launch the compiled C++ Client application.
 2. The client will automatically start the background Go Daemon.
@@ -86,7 +71,7 @@ cmake --build --preset Release
 4. **Join a Session:** Use an Invite Code to join an existing session. New joiners are granted the `Viewer` role by default.
 5. **Add Media:** The `Admin` or users with appropriate permissions can add video files to the queue.
 
-## 📄 License
+## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See [LICENSE](LICENSE) for more information.
 

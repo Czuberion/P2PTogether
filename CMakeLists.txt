@@ -170,8 +170,34 @@ file(GLOB_RECURSE ALL_PROTO_FILES
      "${PROTO_ROOT}/*.proto"
 )
 
+list(SORT ALL_PROTO_FILES)
+
+# Build deterministic output lists from source .proto paths.
+# This avoids re-configure requirements on fresh clones.
+set(PROTO_REL_PATHS "")
+set(PROTO_WITH_SERVICE_REL_PATHS "")
+set(CPP_PROTO_SRCS "")
+set(CPP_PROTO_HDRS "")
+foreach(PROTO_FILE IN LISTS ALL_PROTO_FILES)
+    file(RELATIVE_PATH PROTO_REL_PATH "${PROTO_ROOT}" "${PROTO_FILE}")
+    list(APPEND PROTO_REL_PATHS "${PROTO_REL_PATH}")
+
+    string(REGEX REPLACE "\\.proto$" "" PROTO_BASE_REL "${PROTO_REL_PATH}")
+    list(APPEND CPP_PROTO_SRCS
+        "${CPP_CLIENT_PROTO_OUT_DIR}/${PROTO_BASE_REL}.pb.cc"
+        "${CPP_CLIENT_PROTO_OUT_DIR}/${PROTO_BASE_REL}.grpc.pb.cc")
+    list(APPEND CPP_PROTO_HDRS
+        "${CPP_CLIENT_PROTO_OUT_DIR}/${PROTO_BASE_REL}.pb.h"
+        "${CPP_CLIENT_PROTO_OUT_DIR}/${PROTO_BASE_REL}.grpc.pb.h")
+
+    file(READ "${PROTO_FILE}" PROTO_CONTENT)
+    if(PROTO_CONTENT MATCHES "(^|[\\n\\r])[ \\t]*service[ \\t]+[A-Za-z_][A-Za-z0-9_]*")
+        list(APPEND PROTO_WITH_SERVICE_REL_PATHS "${PROTO_REL_PATH}")
+    endif()
+endforeach()
+
 add_custom_command(
-  OUTPUT ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc
+    OUTPUT ${CPP_PROTO_SRCS} ${CPP_PROTO_HDRS}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${CPP_CLIENT_PROTO_OUT_DIR}
   COMMAND ${PROTOC_EXECUTABLE}
     --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN} # Specify the plugin path
@@ -184,10 +210,6 @@ add_custom_command(
   VERBATIM
 )
 
-# Add generated sources to build
-file(GLOB_RECURSE CPP_PROTO_SRCS
-  "${CPP_CLIENT_PROTO_OUT_DIR}/*.pb.cc"
-)
 list(APPEND SOURCES ${CPP_PROTO_SRCS})
 
 add_executable(P2PTogether ${SOURCES} ${HEADERS})
@@ -408,8 +430,20 @@ find_program(PROTOC_GEN_GO protoc-gen-go REQUIRED)
 find_program(PROTOC_GEN_GO_GRPC protoc-gen-go-grpc REQUIRED)
 set(GO_CLIENT_OUT_DIR "${CMAKE_SOURCE_DIR}/peer_service/proto")
 
+set(GO_PROTO_SRCS "")
+set(GO_GRPC_PROTO_SRCS "")
+foreach(PROTO_REL_PATH IN LISTS PROTO_REL_PATHS)
+    string(REGEX REPLACE "\\.proto$" "" PROTO_BASE_REL "${PROTO_REL_PATH}")
+    list(APPEND GO_PROTO_SRCS "${GO_CLIENT_OUT_DIR}/${PROTO_BASE_REL}.pb.go")
+endforeach()
+foreach(PROTO_REL_PATH IN LISTS PROTO_WITH_SERVICE_REL_PATHS)
+    string(REGEX REPLACE "\\.proto$" "" PROTO_BASE_REL "${PROTO_REL_PATH}")
+    list(APPEND GO_GRPC_PROTO_SRCS "${GO_CLIENT_OUT_DIR}/${PROTO_BASE_REL}_grpc.pb.go")
+endforeach()
+set(GO_PROTO_OUTPUTS ${GO_PROTO_SRCS} ${GO_GRPC_PROTO_SRCS})
+
 add_custom_command(
-  OUTPUT ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
+    OUTPUT ${GO_PROTO_OUTPUTS}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${GO_CLIENT_OUT_DIR}
   COMMAND ${PROTOC_EXECUTABLE}
     --plugin=protoc-gen-go=${PROTOC_GEN_GO}
@@ -423,7 +457,7 @@ add_custom_command(
   VERBATIM
 )
 
-add_custom_target(generate_go_client_proto ALL DEPENDS ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go)
+add_custom_target(generate_go_client_proto ALL DEPENDS ${GO_PROTO_OUTPUTS})
 
 set(GO_SERVICE_SRC ${CMAKE_SOURCE_DIR}/peer_service/main.go)
 set(GO_SERVICE_DIR ${CMAKE_SOURCE_DIR}/peer_service)
@@ -441,7 +475,7 @@ add_custom_command(
     OUTPUT "${GO_SERVICE_BIN}"
     DEPENDS ${GO_SERVICE_SRCS}
             ${GO_WORK_FILE}
-            ${GO_CLIENT_OUT_DIR}/client.pb.go ${GO_CLIENT_OUT_DIR}/client_grpc.pb.go
+            ${GO_PROTO_OUTPUTS}
     COMMAND ${GO_EXECUTABLE} mod tidy
     COMMAND ${GO_EXECUTABLE} build
             -o "${GO_SERVICE_BIN}"
@@ -494,6 +528,6 @@ else()
 endif()
 
 # Ensure proto generation before build
-add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_CLIENT_PROTO_OUT_DIR}/client.pb.cc ${CPP_CLIENT_PROTO_OUT_DIR}/client.grpc.pb.cc)
+add_custom_target(generate_cpp_client_proto ALL DEPENDS ${CPP_PROTO_SRCS} ${CPP_PROTO_HDRS})
 add_dependencies(P2PTogether generate_cpp_client_proto)
 add_dependencies(P2PTogether peer_service)
